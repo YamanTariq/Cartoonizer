@@ -109,13 +109,8 @@
     const rgbMat = new cv.Mat();
     const smoothMat = new cv.Mat();
     const posterizedMat = new cv.Mat();
-    const smoothGrayMat = new cv.Mat();
-    const originalGrayMat = new cv.Mat();
-    const detailGrayMat = new cv.Mat();
-    const smoothEdgesMat = new cv.Mat();
-    const detailEdgesMat = new cv.Mat();
-    const adaptiveEdgesMat = new cv.Mat();
-    const combinedEdgesMat = new cv.Mat();
+    const grayMat = new cv.Mat();
+    const edgesMat = new cv.Mat();
     const edgesRgb = new cv.Mat();
     const finalDst = new cv.Mat();
     const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
@@ -126,69 +121,69 @@
 
     try {
       cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
+
+// 1. Prepare Base Colors & Smoothing
+      cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
       const smoothingPasses =
         settings.cartoonSmoothingMode === 'lut-only' ? 0 : settings.cartoonSmoothingMode === 'single-bilateral' ? 1 : 2;
       edgePreservingSmooth(cv, rgbMat, smoothMat, settings.bilateralDiameter, 30, smoothingPasses);
       applyPosterizationLut(cv, smoothMat, lut, posterizedMat);
 
-      cv.cvtColor(smoothMat, smoothGrayMat, cv.COLOR_RGB2GRAY);
-      cv.cvtColor(rgbMat, originalGrayMat, cv.COLOR_RGB2GRAY);
-      cv.medianBlur(originalGrayMat, detailGrayMat, 3);
+      // 2. Optimized Single-Pass Edge Detection
+      cv.cvtColor(rgbMat, grayMat, cv.COLOR_RGB2GRAY);
+      cv.medianBlur(grayMat, grayMat, 5); // Cleans up speckles so lines look hand-drawn
 
       const edgeIntensity = clamp(Math.round(settings.edgeIntensity), 1, 12);
-      const smoothLow = clamp(82 - edgeIntensity * 6, 18, 72);
-      const detailLow = clamp(58 - edgeIntensity * 4, 14, 48);
       const adaptiveBlockSize = oddKernel(settings.bilateralDiameter + settings.edgeBlockSize * 2 + 5, 9);
       const adaptiveC = clamp(11 - edgeIntensity, 2, 10);
 
-      cv.Canny(smoothGrayMat, smoothEdgesMat, smoothLow, smoothLow * 2.35, 3, false);
-      cv.Canny(detailGrayMat, detailEdgesMat, detailLow, detailLow * 2.15, 3, false);
+      // Extract bold outlines directly as white lines on black background
       cv.adaptiveThreshold(
-        detailGrayMat,
-        adaptiveEdgesMat,
+        grayMat,
+        edgesMat,
         255,
-        cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv.ADAPTIVE_THRESH_MEAN_C, // MEAN_C is faster and provides superior flat comic-style line weights
         cv.THRESH_BINARY_INV,
         adaptiveBlockSize,
         adaptiveC,
       );
 
-      cv.bitwise_or(smoothEdgesMat, detailEdgesMat, combinedEdgesMat);
-      cv.bitwise_or(combinedEdgesMat, adaptiveEdgesMat, combinedEdgesMat);
-      cv.dilate(
-        combinedEdgesMat,
-        combinedEdgesMat,
-        kernel,
-        new cv.Point(-1, -1),
-        1,
-        cv.BORDER_CONSTANT,
-        borderValue,
-      );
+      // 3. Thicken Ink Outlines (Skip operation entirely if slider is set to 1px)
+      if (edgeThickness > 1) {
+        cv.dilate(
+          edgesMat,
+          edgesMat,
+          kernel,
+          new cv.Point(-1, -1),
+          1,
+          cv.BORDER_CONSTANT,
+          borderValue,
+        );
+      }
 
-      cv.bitwise_not(combinedEdgesMat, combinedEdgesMat);
-      cv.cvtColor(combinedEdgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
+      // 4. Invert to black ink on white background and merge
+      cv.bitwise_not(edgesMat, edgesMat);
+      cv.cvtColor(edgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
       cv.bitwise_and(posterizedMat, edgesRgb, finalDst);
 
       return matToRgba(cv, finalDst);
+
     } finally {
       deleteMats(
         rgbMat,
         smoothMat,
         posterizedMat,
-        smoothGrayMat,
-        originalGrayMat,
-        detailGrayMat,
-        smoothEdgesMat,
-        detailEdgesMat,
-        adaptiveEdgesMat,
-        combinedEdgesMat,
+        grayMat,
+        edgesMat,
         edgesRgb,
         finalDst,
         kernel,
         lut,
       );
     }
+
   }
+
 
   function applyAdvancedPencil(cv, src, settings) {
     const grayMat = new cv.Mat();
