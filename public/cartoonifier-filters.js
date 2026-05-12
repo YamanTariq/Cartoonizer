@@ -56,25 +56,36 @@
       return;
     }
 
-    if (typeof cv.pyrMeanShiftFiltering === 'function') {
-      cv.pyrMeanShiftFiltering(src, dst, spatialRadius, colorRadius);
-      return;
-    }
+    // 1. Calculate downscaled dimensions (50% resolution cuts pixel operations by 4x)
+    const smallWidth = Math.max(1, Math.floor(src.cols * 0.5));
+    const smallHeight = Math.max(1, Math.floor(src.rows * 0.5));
 
+    const smallSrc = new cv.Mat();
+    const smallDst = new cv.Mat();
     const temp = new cv.Mat();
 
     try {
+      // 2. Downsample the source image using linear interpolation
+      cv.resize(src, smallSrc, new cv.Size(smallWidth, smallHeight), 0, 0, cv.INTER_LINEAR);
+
+      // 3. Derive bilateral filter parameters safely
       const diameter = oddKernel(spatialRadius, 5);
       const sigmaColor = Math.max(35, colorRadius * 2.4);
       const sigmaSpace = Math.max(16, spatialRadius * 2.2);
+
+      // 4. Apply Bilateral Filter pass(es) on the lightweight downsampled image
       if (passCount === 1) {
-        cv.bilateralFilter(src, dst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
+        cv.bilateralFilter(smallSrc, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       } else {
-        cv.bilateralFilter(src, temp, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
-        cv.bilateralFilter(temp, dst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
+        cv.bilateralFilter(smallSrc, temp, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
+        cv.bilateralFilter(temp, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       }
+
+      // 5. Upsample directly into the output destination matrix
+      cv.resize(smallDst, dst, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_LINEAR);
     } finally {
-      deleteMats(temp);
+      // Guarantee intermediate mats are deleted to prevent WebAssembly memory crashes
+      deleteMats(smallSrc, smallDst, temp);
     }
   }
 
@@ -117,7 +128,7 @@
       cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
       const smoothingPasses =
         settings.cartoonSmoothingMode === 'lut-only' ? 0 : settings.cartoonSmoothingMode === 'single-bilateral' ? 1 : 2;
-      edgePreservingSmooth(cv, rgbMat, smoothMat, 10, 30, smoothingPasses);
+      edgePreservingSmooth(cv, rgbMat, smoothMat, settings.bilateralDiameter, 30, smoothingPasses);
       applyPosterizationLut(cv, smoothMat, lut, posterizedMat);
 
       cv.cvtColor(smoothMat, smoothGrayMat, cv.COLOR_RGB2GRAY);
