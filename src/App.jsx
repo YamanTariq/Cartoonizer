@@ -2,7 +2,7 @@ import { Download, Image as ImageIcon, MonitorPlay, Play, RotateCcw, SlidersHori
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const PROCESSING_WIDTH = 900;
-const FRAME_INTERVAL_MS = 140;
+const FRAME_INTERVAL_MS = 30;
 
 const defaultSettings = {
   mode: 'cartoon',
