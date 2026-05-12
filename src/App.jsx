@@ -1,5 +1,6 @@
 import { Download, Image as ImageIcon, MonitorPlay, Play, RotateCcw, SlidersHorizontal, Video, Webcam } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import opencvWorkerUrl from './workers/opencv.worker.js?worker&url';
 
 const PROCESSING_WIDTH = 900;
 const FRAME_INTERVAL_MS = 30;
@@ -396,7 +397,9 @@ export default function App() {
   useEffect(() => {
     drawPlaceholder('Loading OpenCV...');
 
-    const worker = new Worker(new URL('./workers/opencv.worker.js', import.meta.url));
+    const workerUrl = new URL(opencvWorkerUrl, window.location.href);
+    workerUrl.searchParams.set('filtersUrl', `${import.meta.env.BASE_URL}cartoonifier-filters.js`);
+    const worker = new Worker(workerUrl);
     workerRef.current = worker;
 
     worker.onmessage = (event) => {

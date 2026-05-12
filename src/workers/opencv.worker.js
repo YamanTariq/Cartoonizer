@@ -1,5 +1,6 @@
 const OPENCV_URL = 'https://docs.opencv.org/4.x/opencv.js';
-const FILTERS_URL = '/cartoonifier-filters.js';
+const workerParams = new URL(self.location.href).searchParams;
+const FILTERS_URL = new URL(workerParams.get('filtersUrl') || '../cartoonifier-filters.js', self.location.href).href;
 
 const defaultSettings = {
   mode: 'cartoon',
