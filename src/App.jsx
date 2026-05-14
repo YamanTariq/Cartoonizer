@@ -719,56 +719,105 @@ export default function App() {
             </label>
 
             {settings.mode === 'cartoon' && (
-              <label className="grid gap-2 rounded border border-white/10 bg-white/[0.04] p-3">
-                <span className="text-sm text-slate-200">Cartoon Smoothing</span>
-                <select
-                  className="min-h-10 rounded border border-white/10 bg-slate-950 px-3 text-sm font-semibold text-white outline-none focus:border-cyan-300"
-                  value={settings.cartoonSmoothingMode}
-                  onChange={(event) => setSettings((current) => ({ ...current, cartoonSmoothingMode: event.target.value }))}
-                >
-                  <option value="lut-only">Lookup Table Only</option>
-                  <option value="single-bilateral">1 Bilateral Pass</option>
-                  <option value="double-bilateral">2 Bilateral Passes</option>
-                </select>
-              </label>
+              <>
+                <div className="mt-1 border-t border-white/10 pt-3 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200">
+                  Cartoon Settings
+                </div>
+                <label className="grid gap-2 rounded border border-white/10 bg-white/[0.04] p-3">
+                  <span className="text-sm text-slate-200">Cartoon Smoothing</span>
+                  <select
+                    className="min-h-10 rounded border border-white/10 bg-slate-950 px-3 text-sm font-semibold text-white outline-none focus:border-cyan-300"
+                    value={settings.cartoonSmoothingMode}
+                    onChange={(event) => setSettings((current) => ({ ...current, cartoonSmoothingMode: event.target.value }))}
+                  >
+                    <option value="lut-only">Lookup Table Only</option>
+                    <option value="single-bilateral">1 Bilateral Pass</option>
+                    <option value="double-bilateral">2 Bilateral Passes</option>
+                  </select>
+                </label>
+                <Slider
+                  label="Smoothing / Edge Scale"
+                  min={5}
+                  max={15}
+                  value={settings.bilateralDiameter}
+                  onChange={(value) => setSettings((current) => ({ ...current, bilateralDiameter: value }))}
+                />
+                <Slider
+                  label="Edge Thickness"
+                  min={1}
+                  max={7}
+                  step={1}
+                  value={settings.edgeBlockSize}
+                  onChange={(value) => setSettings((current) => ({ ...current, edgeBlockSize: value }))}
+                />
+                <Slider
+                  label="Edge Intensity"
+                  min={2}
+                  max={10}
+                  value={settings.edgeIntensity}
+                  onChange={(value) => setSettings((current) => ({ ...current, edgeIntensity: value }))}
+                />
+                <Slider
+                  label="Color Quantization"
+                  min={4}
+                  max={32}
+                  value={settings.colorQuantization}
+                  onChange={(value) => setSettings((current) => ({ ...current, colorQuantization: value }))}
+                />
+              </>
             )}
 
-            <Slider
-              label="Bilateral Smoothing"
-              min={5}
-              max={15}
-              value={settings.bilateralDiameter}
-              onChange={(value) => setSettings((current) => ({ ...current, bilateralDiameter: value }))}
-            />
-            <Slider
-              label="Edge Thickness"
-              min={1}
-              max={7}
-              step={1}
-              value={settings.edgeBlockSize}
-              onChange={(value) => setSettings((current) => ({ ...current, edgeBlockSize: value }))}
-            />
-            <Slider
-              label="Edge Intensity"
-              min={2}
-              max={10}
-              value={settings.edgeIntensity}
-              onChange={(value) => setSettings((current) => ({ ...current, edgeIntensity: value }))}
-            />
-            <Slider
-              label="Color Quantization"
-              min={4}
-              max={32}
-              value={settings.colorQuantization}
-              onChange={(value) => setSettings((current) => ({ ...current, colorQuantization: value }))}
-            />
-            <Slider
-              label="Dot / Grid Size"
-              min={4}
-              max={20}
-              value={settings.dotSize}
-              onChange={(value) => setSettings((current) => ({ ...current, dotSize: value }))}
-            />
+            {settings.mode === 'pencil' && (
+              <>
+                <div className="mt-1 border-t border-white/10 pt-3 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200">
+                  Pencil Settings
+                </div>
+                <Slider
+                  label="Blur Strength"
+                  min={5}
+                  max={15}
+                  value={settings.bilateralDiameter}
+                  onChange={(value) => setSettings((current) => ({ ...current, bilateralDiameter: value }))}
+                />
+              </>
+            )}
+
+            {settings.mode === 'popart' && (
+              <>
+                <div className="mt-1 border-t border-white/10 pt-3 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200">
+                  Pop-Art Settings
+                </div>
+                <Slider
+                  label="Edge Thickness"
+                  min={1}
+                  max={7}
+                  step={1}
+                  value={settings.edgeBlockSize}
+                  onChange={(value) => setSettings((current) => ({ ...current, edgeBlockSize: value }))}
+                />
+                <Slider
+                  label="Edge Intensity"
+                  min={2}
+                  max={10}
+                  value={settings.edgeIntensity}
+                  onChange={(value) => setSettings((current) => ({ ...current, edgeIntensity: value }))}
+                />
+                <Slider
+                  label="Color Quantization"
+                  min={4}
+                  max={32}
+                  value={settings.colorQuantization}
+                  onChange={(value) => setSettings((current) => ({ ...current, colorQuantization: value }))}
+                />
+                <Slider
+                  label="Dot / Grid Size"
+                  min={4}
+                  max={20}
+                  value={settings.dotSize}
+                  onChange={(value) => setSettings((current) => ({ ...current, dotSize: value }))}
+                />
+              </>
+            )}
           </div>
         </aside>
       </div>
