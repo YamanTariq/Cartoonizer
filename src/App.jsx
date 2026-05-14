@@ -1,4 +1,16 @@
-import { Download, Image as ImageIcon, MonitorPlay, Play, RotateCcw, SlidersHorizontal, Video, Webcam } from 'lucide-react';
+import {
+  Download,
+  Image as ImageIcon,
+  MonitorPlay,
+  Pause,
+  Play,
+  RotateCcw,
+  SkipBack,
+  SkipForward,
+  SlidersHorizontal,
+  Video,
+  Webcam,
+} from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import opencvWorkerUrl from './workers/opencv.worker.js?worker&url';
 
@@ -67,6 +79,15 @@ function SourceButton({ active, icon: Icon, label, onClick }) {
   );
 }
 
+function formatTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
 export default function App() {
   const [source, setSource] = useState('webcam');
   const [settings, setSettings] = useState(defaultSettings);
@@ -77,6 +98,8 @@ export default function App() {
   const [fps, setFps] = useState(null);
   const [canvasSize, setCanvasSize] = useState({ width: 1280, height: 720 });
   const [isPlaying, setIsPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
 
   const workerRef = useRef(null);
   const videoRef = useRef(null);
@@ -225,6 +248,16 @@ export default function App() {
     sendFrame(new ImageData(new Uint8ClampedArray(imageData.data), imageData.width, imageData.height));
   }, [sendFrame]);
 
+  const processPausedVideoFrame = useCallback(() => {
+    const video = videoRef.current;
+    if (sourceRef.current !== 'video' || !video || !video.paused || !readyRef.current || workerBusyRef.current) return;
+
+    const imageData = captureVideoFrame();
+    if (imageData) {
+      sendFrame(imageData);
+    }
+  }, [captureVideoFrame, sendFrame]);
+
   const startLoop = useCallback(() => {
     stopLoop();
 
@@ -305,6 +338,8 @@ export default function App() {
       setMediaLabel(file.name);
       setIsPlaying(false);
       setFps(null);
+      setVideoCurrentTime(0);
+      setVideoDuration(0);
       setStatusText(readyRef.current ? 'Processing image' : 'Waiting for OpenCV...');
 
       const url = URL.createObjectURL(file);
@@ -331,6 +366,8 @@ export default function App() {
       lastFrameTimeRef.current = 0;
       setSource('video');
       setMediaLabel(file.name);
+      setVideoCurrentTime(0);
+      setVideoDuration(0);
       setStatusText(readyRef.current ? 'Loading video' : 'Waiting for OpenCV...');
 
       const url = URL.createObjectURL(file);
@@ -374,6 +411,33 @@ export default function App() {
       setStatusText(source === 'webcam' ? 'Webcam paused' : 'Video paused');
     }
   }, [source, startLoop]);
+
+  const seekVideoBy = useCallback(
+    (seconds) => {
+      const video = videoRef.current;
+      if (!video || source !== 'video' || !Number.isFinite(video.duration)) return;
+
+      video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds));
+      setVideoCurrentTime(video.currentTime);
+      lastFrameTimeRef.current = 0;
+      processPausedVideoFrame();
+    },
+    [processPausedVideoFrame, source],
+  );
+
+  const scrubVideoTo = useCallback(
+    (seconds) => {
+      const video = videoRef.current;
+      if (!video || source !== 'video') return;
+
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      video.currentTime = duration > 0 ? Math.min(duration, Math.max(0, seconds)) : 0;
+      setVideoCurrentTime(video.currentTime);
+      lastFrameTimeRef.current = 0;
+      processPausedVideoFrame();
+    },
+    [processPausedVideoFrame, source],
+  );
 
   const downloadSnapshot = useCallback(() => {
     const canvas = outputCanvasRef.current;
@@ -475,17 +539,36 @@ export default function App() {
     const handleEnded = () => setIsPlaying(false);
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
+    const handleLoadedMetadata = () => {
+      setVideoDuration(Number.isFinite(video.duration) ? video.duration : 0);
+      setVideoCurrentTime(Number.isFinite(video.currentTime) ? video.currentTime : 0);
+    };
+    const handleTimeUpdate = () => {
+      setVideoCurrentTime(Number.isFinite(video.currentTime) ? video.currentTime : 0);
+    };
+    const handleSeeked = () => {
+      setVideoCurrentTime(Number.isFinite(video.currentTime) ? video.currentTime : 0);
+      processPausedVideoFrame();
+    };
 
     video.addEventListener('ended', handleEnded);
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+    video.addEventListener('loadedmetadata', handleLoadedMetadata);
+    video.addEventListener('durationchange', handleLoadedMetadata);
+    video.addEventListener('timeupdate', handleTimeUpdate);
+    video.addEventListener('seeked', handleSeeked);
 
     return () => {
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('durationchange', handleLoadedMetadata);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+      video.removeEventListener('seeked', handleSeeked);
     };
-  }, []);
+  }, [processPausedVideoFrame]);
 
   const readiness = workerStatus === 'ready' ? 'Ready' : workerStatus === 'error' ? 'Error' : 'Loading';
 
@@ -537,15 +620,17 @@ export default function App() {
                 {modeLabels[settings.mode]} · Pro · {canvasSize.width} x {canvasSize.height}
               </div>
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  className="inline-flex min-h-10 items-center gap-2 rounded border border-white/10 bg-white/[0.05] px-3 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.1]"
-                  onClick={toggleVideoPlayback}
-                  disabled={source === 'image'}
-                >
-                  <Play size={16} />
-                  {isPlaying ? 'Pause' : 'Play'}
-                </button>
+                {source !== 'video' && (
+                  <button
+                    type="button"
+                    className="inline-flex min-h-10 items-center gap-2 rounded border border-white/10 bg-white/[0.05] px-3 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.1]"
+                    onClick={toggleVideoPlayback}
+                    disabled={source === 'image'}
+                  >
+                    {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                    {isPlaying ? 'Pause' : 'Play'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className="inline-flex min-h-10 items-center gap-2 rounded bg-cyan-300 px-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-200"
@@ -556,6 +641,50 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            {source === 'video' && (
+              <div className="grid gap-3 border-t border-white/10 bg-slate-950/80 px-4 py-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="grid h-10 w-10 place-items-center rounded border border-white/10 bg-white/[0.05] text-slate-100 transition hover:bg-white/[0.1]"
+                    title="Back 5 seconds"
+                    onClick={() => seekVideoBy(-5)}
+                  >
+                    <SkipBack size={17} />
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex min-h-10 items-center gap-2 rounded border border-white/10 bg-white/[0.05] px-3 text-sm font-semibold text-slate-100 transition hover:bg-white/[0.1]"
+                    onClick={toggleVideoPlayback}
+                  >
+                    {isPlaying ? <Pause size={16} /> : <Play size={16} />}
+                    {isPlaying ? 'Pause' : 'Play'}
+                  </button>
+                  <button
+                    type="button"
+                    className="grid h-10 w-10 place-items-center rounded border border-white/10 bg-white/[0.05] text-slate-100 transition hover:bg-white/[0.1]"
+                    title="Forward 5 seconds"
+                    onClick={() => seekVideoBy(5)}
+                  >
+                    <SkipForward size={17} />
+                  </button>
+                  <span className="ml-auto rounded bg-white/[0.06] px-2.5 py-1.5 text-xs font-semibold text-slate-300">
+                    {formatTime(videoCurrentTime)} / {formatTime(videoDuration)}
+                  </span>
+                </div>
+                <input
+                  className="h-2 w-full cursor-pointer"
+                  type="range"
+                  min={0}
+                  max={videoDuration || 0}
+                  step={0.05}
+                  value={Math.min(videoCurrentTime, videoDuration || 0)}
+                  onChange={(event) => scrubVideoTo(Number(event.target.value))}
+                  disabled={!videoDuration}
+                />
+              </div>
+            )}
           </div>
         </section>
 

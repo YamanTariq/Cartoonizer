@@ -38,13 +38,14 @@
     return dst;
   }
 
-  function createPosterizationLut(cv, colorLevels) {
+function createPosterizationLut(cv, colorLevels) {
     const safeLevels = clamp(Math.round(colorLevels), 2, 64);
-    const divisor = 256 / safeLevels;
+    // Spans intervals perfectly from endpoints (e.g., Level 2 maps directly to 0 and 255)
+    const step = 255 / (safeLevels - 1);
     const lut = new cv.Mat(1, 256, cv.CV_8UC1);
 
     for (let i = 0; i < 256; i += 1) {
-      lut.data[i] = clamp(Math.floor(i / divisor) * divisor + divisor / 2);
+      lut.data[i] = clamp(Math.round(i / step) * step);
     }
 
     return lut;
@@ -105,50 +106,54 @@
     }
   }
 
-  function applyProCartoon(cv, src, settings) {
+function applyProCartoon(cv, src, settings) {
     const rgbMat = new cv.Mat();
     const smoothMat = new cv.Mat();
-    const posterizedMat = new cv.Mat();
+    const quantizedMat = new cv.Mat();
     const grayMat = new cv.Mat();
     const edgesMat = new cv.Mat();
     const edgesRgb = new cv.Mat();
     const finalDst = new cv.Mat();
+
     const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
     const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
-    const lut = createPosterizationLut(cv, settings.colorQuantization);
     const borderValue =
       typeof cv.morphologyDefaultBorderValue === 'function' ? cv.morphologyDefaultBorderValue() : new cv.Scalar();
 
     try {
-      cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
-
-// 1. Prepare Base Colors & Smoothing
+      // 1. Prepare Base Colors & Edge-Preserving Smoothing
       cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
       const smoothingPasses =
         settings.cartoonSmoothingMode === 'lut-only' ? 0 : settings.cartoonSmoothingMode === 'single-bilateral' ? 1 : 2;
+      
       edgePreservingSmooth(cv, rgbMat, smoothMat, settings.bilateralDiameter, 30, smoothingPasses);
-      applyPosterizationLut(cv, smoothMat, lut, posterizedMat);
 
-      // 2. Optimized Single-Pass Edge Detection
+      // 2. HSV Vibrance Boost (Injects 40% extra saturation pop safely in place)
+      boostColor(cv, smoothMat, smoothMat, 1.4, 1.05, 0);
+
+      // 3. Dynamic Content-Aware Color Quantization (K-Means Clustering)
+      // Replaces uniform LUT mapping to group smooth wall shadows into flat solid segments
+      applyKMeansQuantization(cv, smoothMat, quantizedMat, settings.colorQuantization);
+
+      // 4. Optimized Single-Pass Edge Detection
       cv.cvtColor(rgbMat, grayMat, cv.COLOR_RGB2GRAY);
-      cv.medianBlur(grayMat, grayMat, 5); // Cleans up speckles so lines look hand-drawn
+      cv.medianBlur(grayMat, grayMat, 5);
 
       const edgeIntensity = clamp(Math.round(settings.edgeIntensity), 1, 12);
       const adaptiveBlockSize = oddKernel(settings.bilateralDiameter + settings.edgeBlockSize * 2 + 5, 9);
       const adaptiveC = clamp(11 - edgeIntensity, 2, 10);
 
-      // Extract bold outlines directly as white lines on black background
       cv.adaptiveThreshold(
         grayMat,
         edgesMat,
         255,
-        cv.ADAPTIVE_THRESH_MEAN_C, // MEAN_C is faster and provides superior flat comic-style line weights
+        cv.ADAPTIVE_THRESH_MEAN_C,
         cv.THRESH_BINARY_INV,
         adaptiveBlockSize,
         adaptiveC,
       );
 
-      // 3. Thicken Ink Outlines (Skip operation entirely if slider is set to 1px)
+      // 5. Thicken Outlines (Skip operation entirely if slider is set to 1px)
       if (edgeThickness > 1) {
         cv.dilate(
           edgesMat,
@@ -161,27 +166,25 @@
         );
       }
 
-      // 4. Invert to black ink on white background and merge
+      // 6. Invert to black ink on white background and merge
       cv.bitwise_not(edgesMat, edgesMat);
       cv.cvtColor(edgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
-      cv.bitwise_and(posterizedMat, edgesRgb, finalDst);
+      cv.bitwise_and(quantizedMat, edgesRgb, finalDst);
 
       return matToRgba(cv, finalDst);
-
     } finally {
+      // Perfectly aligned cleanup array prevents WebAssembly garbage collection crashes
       deleteMats(
         rgbMat,
         smoothMat,
-        posterizedMat,
+        quantizedMat,
         grayMat,
         edgesMat,
         edgesRgb,
         finalDst,
         kernel,
-        lut,
       );
     }
-
   }
 
 function applyAdvancedPencil(cv, src, settings) {
@@ -225,6 +228,7 @@ function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
       deleteMats(hsv);
     }
   }
+
 
   function posterizeColors(cv, src, dst, levels) {
     const safeLevels = clamp(Math.round(levels), 2, 32);
@@ -328,6 +332,97 @@ function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
       deleteMats(rgb, smooth, gray, edges, whiteLineMask, kernel, boosted, colorBase, halftone, pop);
     }
   }
+
+function applyKMeansQuantization(cv, src, dst, kLevels) {
+    const safeK = clamp(Math.round(kLevels), 2, 32);
+    dst.create(src.rows, src.cols, cv.CV_8UC3);
+
+    // 1. Shrink image to extract representative color samples instantly
+    const sampleMat = new cv.Mat();
+    try {
+      cv.resize(src, sampleMat, new cv.Size(80, 80), 0, 0, cv.INTER_AREA);
+      const sampleData = sampleMat.data;
+      const numSamples = sampleData.length / 3;
+
+      // 2. Initialize K centroids evenly across the sample pool
+      const centroids = [];
+      const step = Math.max(1, Math.floor(numSamples / safeK));
+      for (let i = 0; i < safeK; i += 1) {
+        const idx = i * step * 3;
+        centroids.push({
+          r: sampleData[idx],
+          g: sampleData[idx + 1],
+          b: sampleData[idx + 2],
+        });
+      }
+
+      // 3. Run a lightweight K-Means loop (5 iterations ensures strong convergence)
+      const maxIterations = 5;
+      for (let iter = 0; iter < maxIterations; iter += 1) {
+        const sums = Array(safeK).fill(0).map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+
+        for (let i = 0; i < sampleData.length; i += 3) {
+          const r = sampleData[i];
+          const g = sampleData[i + 1];
+          const b = sampleData[i + 2];
+
+          let minDist = Infinity;
+          let bestCluster = 0;
+          for (let c = 0; c < safeK; c += 1) {
+            const cent = centroids[c];
+            const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
+            if (dist < minDist) {
+              minDist = dist;
+              bestCluster = c;
+            }
+          }
+
+          sums[bestCluster].r += r;
+          sums[bestCluster].g += g;
+          sums[bestCluster].b += b;
+          sums[bestCluster].count += 1;
+        }
+
+        // Update centroids to their new center of mass
+        for (let c = 0; c < safeK; c += 1) {
+          if (sums[c].count > 0) {
+            centroids[c].r = sums[c].r / sums[c].count;
+            centroids[c].g = sums[c].g / sums[c].count;
+            centroids[c].b = sums[c].b / sums[c].count;
+          }
+        }
+      }
+
+      // 4. Map the full smoothed source image directly to the converged centroids
+      const inputData = src.data;
+      const outputData = dst.data;
+
+      for (let i = 0; i < inputData.length; i += 3) {
+        const r = inputData[i];
+        const g = inputData[i + 1];
+        const b = inputData[i + 2];
+
+        let minDist = Infinity;
+        let bestCentroid = centroids[0];
+
+        for (let c = 0; c < safeK; c += 1) {
+          const cent = centroids[c];
+          const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
+          if (dist < minDist) {
+            minDist = dist;
+            bestCentroid = cent;
+          }
+        }
+
+        outputData[i] = clamp(Math.round(bestCentroid.r));
+        outputData[i + 1] = clamp(Math.round(bestCentroid.g));
+        outputData[i + 2] = clamp(Math.round(bestCentroid.b));
+      }
+    } finally {
+      deleteMats(sampleMat);
+    }
+  }
+
 
 
   function applyFilter(cv, src, settings) {
