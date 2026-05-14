@@ -187,26 +187,127 @@ function applyProCartoon(cv, src, settings) {
     }
   }
 
+// function applyAdvancedPencil(cv, src, settings) {
+//     const grayMat = new cv.Mat();
+//     const invertedMat = new cv.Mat();
+//     const blurredMat = new cv.Mat();
+//     const invertedBlurredMat = new cv.Mat();
+//     const finalDst = new cv.Mat();
+
+//     try {
+//       const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 5));
+//       const ksize = oddKernel(blurStrength * 4 + 1, 5);
+
+//       cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
+//       cv.bitwise_not(grayMat, invertedMat);
+//       cv.GaussianBlur(invertedMat, blurredMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
+//       cv.bitwise_not(blurredMat, invertedBlurredMat);
+//       cv.divide(grayMat, invertedBlurredMat, finalDst, 256.0);
+
+//       return matToRgba(cv, finalDst);
+//     } finally {
+//       deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, finalDst);
+//     }
+//   }
 function applyAdvancedPencil(cv, src, settings) {
     const grayMat = new cv.Mat();
     const invertedMat = new cv.Mat();
     const blurredMat = new cv.Mat();
     const invertedBlurredMat = new cv.Mat();
+    const baseSketch = new cv.Mat();
+    const edgesMat = new cv.Mat();
     const finalDst = new cv.Mat();
 
     try {
-      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 5));
+      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 9));
       const ksize = oddKernel(blurStrength * 4 + 1, 5);
 
+      // Generate Color Dodge soft base tone
       cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
       cv.bitwise_not(grayMat, invertedMat);
       cv.GaussianBlur(invertedMat, blurredMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
       cv.bitwise_not(blurredMat, invertedBlurredMat);
-      cv.divide(grayMat, invertedBlurredMat, finalDst, 256.0);
+      cv.divide(grayMat, invertedBlurredMat, baseSketch, 256.0);
+
+      // Extract structural outlines
+      const edgeBlockSize = oddKernel(blurStrength * 2 + 3, 9);
+      cv.adaptiveThreshold(
+        grayMat,
+        edgesMat,
+        255,
+        cv.ADAPTIVE_THRESH_MEAN_C,
+        cv.THRESH_BINARY_INV,
+        edgeBlockSize,
+        5
+      );
+
+      // Overlay dark outlines directly onto the soft sketch base
+      finalDst.create(src.rows, src.cols, cv.CV_8UC1);
+      const sketchData = baseSketch.data;
+      const edgeData = edgesMat.data;
+      const outData = finalDst.data;
+
+      for (let i = 0; i < outData.length; i += 1) {
+        outData[i] = edgeData[i] > 0 ? clamp(sketchData[i] * 0.25) : sketchData[i];
+      }
 
       return matToRgba(cv, finalDst);
     } finally {
-      deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, finalDst);
+      deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, baseSketch, edgesMat, finalDst);
+    }
+  }
+
+
+function applyGlobalHatching(cv, srcRgba, targetRgba) {
+    const grayMat = new cv.Mat();
+    try {
+      // 1. Extract true scene luminance from the raw input frame
+      cv.cvtColor(srcRgba, grayMat, cv.COLOR_RGBA2GRAY);
+      
+      const rows = targetRgba.rows;
+      const cols = targetRgba.cols;
+      const lumData = grayMat.data;
+      const targetData = targetRgba.data;
+
+      // Configure your procedural pencil grid metrics
+      const hatchSpacing = 5;     // Distance between strokes
+      const hatchThickness = 1;   // Stroke line width
+
+      for (let r = 0; r < rows; r += 1) {
+        for (let c = 0; c < cols; c += 1) {
+          const idx = r * cols + c;
+          const luminance = lumData[idx];
+
+          // Diagonal coordinate intersection math
+          const isPrimaryStroke = (r + c) % hatchSpacing < hatchThickness;
+          const isSecondaryStroke = (r - c + cols) % hatchSpacing < hatchThickness;
+
+          let shadeFactor = 1.0;
+
+          // Map shading density based on real-world illumination thresholds
+          if (luminance < 95) {
+            // Deep shadows: Intersecting grid pattern
+            if (isPrimaryStroke || isSecondaryStroke) {
+              shadeFactor = 0.65;
+            }
+          } else if (luminance < 165) {
+            // Mid-tones: Single-directional parallel lines
+            if (isPrimaryStroke) {
+              shadeFactor = 0.82;
+            }
+          }
+
+          // Directly attenuate RGB channels in-place (skipping Alpha at offset +3)
+          if (shadeFactor < 1.0) {
+            const pIdx = idx * 4;
+            targetData[pIdx] = clamp(targetData[pIdx] * shadeFactor);
+            targetData[pIdx + 1] = clamp(targetData[pIdx + 1] * shadeFactor);
+            targetData[pIdx + 2] = clamp(targetData[pIdx + 2] * shadeFactor);
+          }
+        }
+      }
+    } finally {
+      deleteMats(grayMat);
     }
   }
 
@@ -424,18 +525,24 @@ function applyKMeansQuantization(cv, src, dst, kLevels) {
   }
 
 
+function applyFilter(cv, src, settings) {
+    let result;
 
-  function applyFilter(cv, src, settings) {
+    // 1. Generate base filter graphics
     if (settings.mode === 'pencil') {
-      return applyAdvancedPencil(cv, src, settings);
+      result = applyAdvancedPencil(cv, src, settings);
+    } else if (settings.mode === 'popart') {
+      result = applyPopArt(cv, src, settings);
+    } else {
+      result = applyProCartoon(cv, src, settings);
     }
 
-    if (settings.mode === 'popart') {
-      return applyPopArt(cv, src, settings);
-    }
+    // 2. Stamp the dynamic directional shading grid globally
+    applyGlobalHatching(cv, src, result);
 
-    return applyProCartoon(cv, src, settings);
+    return result;
   }
+
 
   globalScope.CartoonifierFilters = {
     applyFilter,
