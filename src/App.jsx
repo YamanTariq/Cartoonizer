@@ -31,6 +31,7 @@ const modeLabels = {
   cartoon: 'Cartoon',
   pencil: 'Pencil Sketch',
   popart: 'Pop-Art',
+  oilpainting: 'Oil Painting',
 };
 
 const sourceLabels = {
@@ -81,7 +82,6 @@ function SourceButton({ active, icon: Icon, label, onClick }) {
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-
   const totalSeconds = Math.floor(seconds);
   const minutes = Math.floor(totalSeconds / 60);
   const remainingSeconds = totalSeconds % 60;
@@ -189,13 +189,11 @@ export default function App() {
       canvas.height = imageData.height;
       setCanvasSize({ width: imageData.width, height: imageData.height });
     }
-
     ctx.putImageData(imageData, 0, 0);
   }, []);
 
   const sendFrame = useCallback((imageData) => {
     if (!readyRef.current || workerBusyRef.current || !workerRef.current) return false;
-
     workerBusyRef.current = true;
     frameIdRef.current += 1;
     workerRef.current.postMessage(
@@ -208,7 +206,6 @@ export default function App() {
       },
       [imageData.data.buffer],
     );
-
     return true;
   }, []);
 
@@ -218,7 +215,6 @@ export default function App() {
     if (!video || !sourceCanvas || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
       return null;
     }
-
     const scale = Math.min(1, PROCESSING_WIDTH / video.videoWidth);
     const width = Math.max(1, Math.round(video.videoWidth * scale));
     const height = Math.max(1, Math.round(video.videoHeight * scale));
@@ -251,16 +247,12 @@ export default function App() {
   const processPausedVideoFrame = useCallback(() => {
     const video = videoRef.current;
     if (sourceRef.current !== 'video' || !video || !video.paused || !readyRef.current || workerBusyRef.current) return;
-
     const imageData = captureVideoFrame();
-    if (imageData) {
-      sendFrame(imageData);
-    }
+    if (imageData) sendFrame(imageData);
   }, [captureVideoFrame, sendFrame]);
 
   const startLoop = useCallback(() => {
     stopLoop();
-
     const tick = (timestamp) => {
       const video = videoRef.current;
       const elapsedSinceLastFrame = timestamp - lastFrameTimeRef.current;
@@ -283,10 +275,8 @@ export default function App() {
           lastFrameTimeRef.current = timestamp;
         }
       }
-
       animationRef.current = requestAnimationFrame(tick);
     };
-
     animationRef.current = requestAnimationFrame(tick);
   }, [captureVideoFrame, sendFrame, stopLoop]);
 
@@ -302,14 +292,9 @@ export default function App() {
     try {
       stopWebcam();
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user',
-        },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false,
       });
-
       streamRef.current = stream;
       const video = videoRef.current;
       video.srcObject = stream;
@@ -326,76 +311,67 @@ export default function App() {
     }
   }, [clearObjectUrl, drawPlaceholder, startLoop, stopLoop, stopWebcam]);
 
-  const handleImageUpload = useCallback(
-    (file) => {
-      if (!file) return;
+  const handleImageUpload = useCallback((file) => {
+    if (!file) return;
+    stopLoop();
+    stopWebcam();
+    clearObjectUrl();
+    lastFrameTimeRef.current = 0;
+    setSource('image');
+    setMediaLabel(file.name);
+    setIsPlaying(false);
+    setFps(null);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    setStatusText(readyRef.current ? 'Processing image' : 'Waiting for OpenCV...');
 
-      stopLoop();
-      stopWebcam();
-      clearObjectUrl();
-      lastFrameTimeRef.current = 0;
-      setSource('image');
-      setMediaLabel(file.name);
+    const url = URL.createObjectURL(file);
+    objectUrlRef.current = url;
+    const image = imageRef.current;
+    image.onload = () => processStillImage();
+    image.onerror = () => {
+      setStatusText('Unable to load image');
+      drawPlaceholder('Image load failed');
+    };
+    image.src = url;
+  }, [clearObjectUrl, drawPlaceholder, processStillImage, stopLoop, stopWebcam]);
+
+  const handleVideoUpload = useCallback(async (file) => {
+    if (!file) return;
+    stopLoop();
+    stopWebcam();
+    clearObjectUrl();
+    stillImageDataRef.current = null;
+    lastFrameTimeRef.current = 0;
+    setSource('video');
+    setMediaLabel(file.name);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    setStatusText(readyRef.current ? 'Loading video' : 'Waiting for OpenCV...');
+
+    const url = URL.createObjectURL(file);
+    objectUrlRef.current = url;
+    const video = videoRef.current;
+    video.srcObject = null;
+    video.src = url;
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+
+    try {
+      await video.play();
+      setIsPlaying(true);
+      setStatusText('Video processing');
+      startLoop();
+    } catch {
       setIsPlaying(false);
-      setFps(null);
-      setVideoCurrentTime(0);
-      setVideoDuration(0);
-      setStatusText(readyRef.current ? 'Processing image' : 'Waiting for OpenCV...');
-
-      const url = URL.createObjectURL(file);
-      objectUrlRef.current = url;
-      const image = imageRef.current;
-      image.onload = () => processStillImage();
-      image.onerror = () => {
-        setStatusText('Unable to load image');
-        drawPlaceholder('Image load failed');
-      };
-      image.src = url;
-    },
-    [clearObjectUrl, drawPlaceholder, processStillImage, stopLoop, stopWebcam],
-  );
-
-  const handleVideoUpload = useCallback(
-    async (file) => {
-      if (!file) return;
-
-      stopLoop();
-      stopWebcam();
-      clearObjectUrl();
-      stillImageDataRef.current = null;
-      lastFrameTimeRef.current = 0;
-      setSource('video');
-      setMediaLabel(file.name);
-      setVideoCurrentTime(0);
-      setVideoDuration(0);
-      setStatusText(readyRef.current ? 'Loading video' : 'Waiting for OpenCV...');
-
-      const url = URL.createObjectURL(file);
-      objectUrlRef.current = url;
-      const video = videoRef.current;
-      video.srcObject = null;
-      video.src = url;
-      video.muted = true;
-      video.loop = true;
-      video.playsInline = true;
-
-      try {
-        await video.play();
-        setIsPlaying(true);
-        setStatusText('Video processing');
-        startLoop();
-      } catch {
-        setIsPlaying(false);
-        setStatusText('Press play to process uploaded video');
-      }
-    },
-    [clearObjectUrl, startLoop, stopLoop, stopWebcam],
-  );
+      setStatusText('Press play to process uploaded video');
+    }
+  }, [clearObjectUrl, startLoop, stopLoop, stopWebcam]);
 
   const toggleVideoPlayback = useCallback(async () => {
     const video = videoRef.current;
     if (!video || source === 'image') return;
-
     if (video.paused) {
       try {
         await video.play();
@@ -412,37 +388,28 @@ export default function App() {
     }
   }, [source, startLoop]);
 
-  const seekVideoBy = useCallback(
-    (seconds) => {
-      const video = videoRef.current;
-      if (!video || source !== 'video' || !Number.isFinite(video.duration)) return;
+  const seekVideoBy = useCallback((seconds) => {
+    const video = videoRef.current;
+    if (!video || source !== 'video' || !Number.isFinite(video.duration)) return;
+    video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds));
+    setVideoCurrentTime(video.currentTime);
+    lastFrameTimeRef.current = 0;
+    processPausedVideoFrame();
+  }, [processPausedVideoFrame, source]);
 
-      video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + seconds));
-      setVideoCurrentTime(video.currentTime);
-      lastFrameTimeRef.current = 0;
-      processPausedVideoFrame();
-    },
-    [processPausedVideoFrame, source],
-  );
-
-  const scrubVideoTo = useCallback(
-    (seconds) => {
-      const video = videoRef.current;
-      if (!video || source !== 'video') return;
-
-      const duration = Number.isFinite(video.duration) ? video.duration : 0;
-      video.currentTime = duration > 0 ? Math.min(duration, Math.max(0, seconds)) : 0;
-      setVideoCurrentTime(video.currentTime);
-      lastFrameTimeRef.current = 0;
-      processPausedVideoFrame();
-    },
-    [processPausedVideoFrame, source],
-  );
+  const scrubVideoTo = useCallback((seconds) => {
+    const video = videoRef.current;
+    if (!video || source !== 'video') return;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    video.currentTime = duration > 0 ? Math.min(duration, Math.max(0, seconds)) : 0;
+    setVideoCurrentTime(video.currentTime);
+    lastFrameTimeRef.current = 0;
+    processPausedVideoFrame();
+  }, [processPausedVideoFrame, source]);
 
   const downloadSnapshot = useCallback(() => {
     const canvas = outputCanvasRef.current;
     if (!canvas) return;
-
     const link = document.createElement('a');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     link.download = `cartoonifier-${timestamp}.png`;
@@ -460,7 +427,6 @@ export default function App() {
 
   useEffect(() => {
     drawPlaceholder('Loading OpenCV...');
-
     const workerUrl = new URL(opencvWorkerUrl, window.location.href);
     workerUrl.searchParams.set('filtersUrl', `${import.meta.env.BASE_URL}cartoonifier-filters.js`);
     const worker = new Worker(workerUrl);
@@ -468,7 +434,6 @@ export default function App() {
 
     worker.onmessage = (event) => {
       const { type } = event.data;
-
       if (type === 'ready') {
         readyRef.current = true;
         setWorkerStatus('ready');
@@ -479,7 +444,6 @@ export default function App() {
           sendFrame(new ImageData(new Uint8ClampedArray(data.data), data.width, data.height));
         }
       }
-
       if (type === 'processedFrame') {
         const { imageData, processingMs } = event.data;
         workerBusyRef.current = false;
@@ -496,7 +460,6 @@ export default function App() {
           }
         }
       }
-
       if (type === 'error') {
         workerBusyRef.current = false;
         setWorkerStatus('error');
@@ -521,7 +484,6 @@ export default function App() {
 
   useEffect(() => {
     postSettings(normalizedSettings);
-
     if (source === 'image' && stillImageDataRef.current && readyRef.current) {
       const data = stillImageDataRef.current;
       if (workerBusyRef.current) {
@@ -535,7 +497,6 @@ export default function App() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return undefined;
-
     const handleEnded = () => setIsPlaying(false);
     const handlePlay = () => setIsPlaying(true);
     const handlePause = () => setIsPlaying(false);
@@ -715,6 +676,7 @@ export default function App() {
                 <option value="cartoon">Cartoon</option>
                 <option value="pencil">Pencil Sketch</option>
                 <option value="popart">Pop-Art</option>
+                <option value="oilpainting">Oil Painting</option>
               </select>
             </label>
 
@@ -815,6 +777,21 @@ export default function App() {
                   max={20}
                   value={settings.dotSize}
                   onChange={(value) => setSettings((current) => ({ ...current, dotSize: value }))}
+                />
+              </>
+            )}
+
+            {settings.mode === 'oilpainting' && (
+              <>
+                <div className="mt-1 border-t border-white/10 pt-3 text-xs font-bold uppercase tracking-[0.18em] text-cyan-200">
+                  Oil Painting Settings
+                </div>
+                <Slider
+                  label="Brush Size (Radius)"
+                  min={2}
+                  max={8}
+                  value={settings.bilateralDiameter}
+                  onChange={(value) => setSettings((current) => ({ ...current, bilateralDiameter: value }))}
                 />
               </>
             )}

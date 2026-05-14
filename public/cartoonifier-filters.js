@@ -18,7 +18,6 @@
 
   function matToRgba(cv, mat) {
     const dst = new cv.Mat();
-
     if (mat.type() === cv.CV_8UC4) {
       mat.copyTo(dst);
     } else if (mat.type() === cv.CV_8UC3) {
@@ -34,21 +33,7 @@
         deleteMats(converted);
       }
     }
-
     return dst;
-  }
-
-function createPosterizationLut(cv, colorLevels) {
-    const safeLevels = clamp(Math.round(colorLevels), 2, 64);
-    // Spans intervals perfectly from endpoints (e.g., Level 2 maps directly to 0 and 255)
-    const step = 255 / (safeLevels - 1);
-    const lut = new cv.Mat(1, 256, cv.CV_8UC1);
-
-    for (let i = 0; i < 256; i += 1) {
-      lut.data[i] = clamp(Math.round(i / step) * step);
-    }
-
-    return lut;
   }
 
   function edgePreservingSmooth(cv, src, dst, spatialRadius, colorRadius, passCount = 2) {
@@ -56,248 +41,150 @@ function createPosterizationLut(cv, colorLevels) {
       src.copyTo(dst);
       return;
     }
-
-    // 1. Calculate downscaled dimensions (50% resolution cuts pixel operations by 4x)
     const smallWidth = Math.max(1, Math.floor(src.cols * 0.5));
     const smallHeight = Math.max(1, Math.floor(src.rows * 0.5));
-
     const smallSrc = new cv.Mat();
     const smallDst = new cv.Mat();
     const temp = new cv.Mat();
 
     try {
-      // 2. Downsample the source image using linear interpolation
       cv.resize(src, smallSrc, new cv.Size(smallWidth, smallHeight), 0, 0, cv.INTER_LINEAR);
-
-      // 3. Derive bilateral filter parameters safely
       const diameter = oddKernel(spatialRadius, 5);
       const sigmaColor = Math.max(35, colorRadius * 2.4);
       const sigmaSpace = Math.max(16, spatialRadius * 2.2);
 
-      // 4. Apply Bilateral Filter pass(es) on the lightweight downsampled image
       if (passCount === 1) {
         cv.bilateralFilter(smallSrc, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       } else {
         cv.bilateralFilter(smallSrc, temp, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
         cv.bilateralFilter(temp, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       }
-
-      // 5. Upsample directly into the output destination matrix
       cv.resize(smallDst, dst, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_LINEAR);
     } finally {
-      // Guarantee intermediate mats are deleted to prevent WebAssembly memory crashes
       deleteMats(smallSrc, smallDst, temp);
     }
   }
 
-  function applyPosterizationLut(cv, src, lut, dst) {
-    if (typeof cv.LUT === 'function') {
-      cv.LUT(src, lut, dst);
-      return;
+  function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
+    const hsv = new cv.Mat();
+    try {
+      cv.cvtColor(src, hsv, cv.COLOR_RGB2HSV);
+      const data = hsv.data;
+      for (let i = 0; i < data.length; i += 3) {
+        data[i + 1] = clamp(data[i + 1] * saturationScale);
+        data[i + 2] = clamp(data[i + 2] * valueScale + valueOffset);
+      }
+      cv.cvtColor(hsv, dst, cv.COLOR_HSV2RGB);
+    } finally {
+      deleteMats(hsv);
     }
+  }
 
-    dst.create(src.rows, src.cols, src.type());
+  function posterizeColors(cv, src, dst, levels) {
+    const safeLevels = clamp(Math.round(levels), 2, 32);
+    dst.create(src.rows, src.cols, cv.CV_8UC3);
+    const step = 255 / (safeLevels - 1);
     const input = src.data;
     const output = dst.data;
-    const table = lut.data;
-
-    for (let i = 0; i < input.length; i += 1) {
-      output[i] = table[input[i]];
+    for (let i = 0; i < input.length; i += 3) {
+      output[i] = clamp(Math.round(input[i] / step) * step);
+      output[i + 1] = clamp(Math.round(input[i + 1] / step) * step);
+      output[i + 2] = clamp(Math.round(input[i + 2] / step) * step);
     }
   }
 
-function applyProCartoon(cv, src, settings) {
-    const rgbMat = new cv.Mat();
-    const smoothMat = new cv.Mat();
-    const quantizedMat = new cv.Mat();
-    const grayMat = new cv.Mat();
-    const edgesMat = new cv.Mat();
-    const edgesRgb = new cv.Mat();
-    const finalDst = new cv.Mat();
+  function overlayInk(cv, color, whiteEdgeMask, dst, strength = 1) {
+    dst.create(color.rows, color.cols, cv.CV_8UC3);
+    const colorData = color.data;
+    const edgeData = whiteEdgeMask.data;
+    const output = dst.data;
+    for (let pixel = 0; pixel < edgeData.length; pixel += 1) {
+      const colorIndex = pixel * 3;
+      const ink = clamp(((255 - edgeData[pixel]) / 255) * strength, 0, 1);
+      const keep = 1 - ink;
+      output[colorIndex] = colorData[colorIndex] * keep;
+      output[colorIndex + 1] = colorData[colorIndex + 1] * keep;
+      output[colorIndex + 2] = colorData[colorIndex + 2] * keep;
+    }
+  }
 
-    const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
-    const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
-    const borderValue =
-      typeof cv.morphologyDefaultBorderValue === 'function' ? cv.morphologyDefaultBorderValue() : new cv.Scalar();
-
+  function applyKMeansQuantization(cv, src, dst, kLevels) {
+    const safeK = clamp(Math.round(kLevels), 2, 32);
+    dst.create(src.rows, src.cols, cv.CV_8UC3);
+    const sampleMat = new cv.Mat();
     try {
-      // 1. Prepare Base Colors & Edge-Preserving Smoothing
-      cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
-      const smoothingPasses =
-        settings.cartoonSmoothingMode === 'lut-only' ? 0 : settings.cartoonSmoothingMode === 'single-bilateral' ? 1 : 2;
-      
-      edgePreservingSmooth(cv, rgbMat, smoothMat, settings.bilateralDiameter, 30, smoothingPasses);
-
-      // 2. HSV Vibrance Boost (Injects 40% extra saturation pop safely in place)
-      boostColor(cv, smoothMat, smoothMat, 1.4, 1.05, 0);
-
-      // 3. Dynamic Content-Aware Color Quantization (K-Means Clustering)
-      // Replaces uniform LUT mapping to group smooth wall shadows into flat solid segments
-      applyKMeansQuantization(cv, smoothMat, quantizedMat, settings.colorQuantization);
-
-      // 4. Optimized Single-Pass Edge Detection
-      cv.cvtColor(rgbMat, grayMat, cv.COLOR_RGB2GRAY);
-      cv.medianBlur(grayMat, grayMat, 5);
-
-      const edgeIntensity = clamp(Math.round(settings.edgeIntensity), 1, 12);
-      const adaptiveBlockSize = oddKernel(settings.bilateralDiameter + settings.edgeBlockSize * 2 + 5, 9);
-      const adaptiveC = clamp(11 - edgeIntensity, 2, 10);
-
-      cv.adaptiveThreshold(
-        grayMat,
-        edgesMat,
-        255,
-        cv.ADAPTIVE_THRESH_MEAN_C,
-        cv.THRESH_BINARY_INV,
-        adaptiveBlockSize,
-        adaptiveC,
-      );
-
-      // 5. Thicken Outlines (Skip operation entirely if slider is set to 1px)
-      if (edgeThickness > 1) {
-        cv.dilate(
-          edgesMat,
-          edgesMat,
-          kernel,
-          new cv.Point(-1, -1),
-          1,
-          cv.BORDER_CONSTANT,
-          borderValue,
-        );
+      cv.resize(src, sampleMat, new cv.Size(80, 80), 0, 0, cv.INTER_AREA);
+      const sampleData = sampleMat.data;
+      const numSamples = sampleData.length / 3;
+      const centroids = [];
+      const step = Math.max(1, Math.floor(numSamples / safeK));
+      for (let i = 0; i < safeK; i += 1) {
+        const idx = i * step * 3;
+        centroids.push({ r: sampleData[idx], g: sampleData[idx + 1], b: sampleData[idx + 2] });
       }
 
-      // 6. Invert to black ink on white background and merge
-      cv.bitwise_not(edgesMat, edgesMat);
-      cv.cvtColor(edgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
-      cv.bitwise_and(quantizedMat, edgesRgb, finalDst);
-
-      return matToRgba(cv, finalDst);
-    } finally {
-      // Perfectly aligned cleanup array prevents WebAssembly garbage collection crashes
-      deleteMats(
-        rgbMat,
-        smoothMat,
-        quantizedMat,
-        grayMat,
-        edgesMat,
-        edgesRgb,
-        finalDst,
-        kernel,
-      );
-    }
-  }
-
-// function applyAdvancedPencil(cv, src, settings) {
-//     const grayMat = new cv.Mat();
-//     const invertedMat = new cv.Mat();
-//     const blurredMat = new cv.Mat();
-//     const invertedBlurredMat = new cv.Mat();
-//     const finalDst = new cv.Mat();
-
-//     try {
-//       const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 5));
-//       const ksize = oddKernel(blurStrength * 4 + 1, 5);
-
-//       cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
-//       cv.bitwise_not(grayMat, invertedMat);
-//       cv.GaussianBlur(invertedMat, blurredMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
-//       cv.bitwise_not(blurredMat, invertedBlurredMat);
-//       cv.divide(grayMat, invertedBlurredMat, finalDst, 256.0);
-
-//       return matToRgba(cv, finalDst);
-//     } finally {
-//       deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, finalDst);
-//     }
-//   }
-function applyAdvancedPencil(cv, src, settings) {
-    const grayMat = new cv.Mat();
-    const invertedMat = new cv.Mat();
-    const blurredMat = new cv.Mat();
-    const invertedBlurredMat = new cv.Mat();
-    const baseSketch = new cv.Mat();
-    const edgesMat = new cv.Mat();
-    const finalDst = new cv.Mat();
-
-    try {
-      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 9));
-      const ksize = oddKernel(blurStrength * 4 + 1, 5);
-
-      // Generate Color Dodge soft base tone
-      cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
-      cv.bitwise_not(grayMat, invertedMat);
-      cv.GaussianBlur(invertedMat, blurredMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
-      cv.bitwise_not(blurredMat, invertedBlurredMat);
-      cv.divide(grayMat, invertedBlurredMat, baseSketch, 256.0);
-
-      // Extract structural outlines
-      const edgeBlockSize = oddKernel(blurStrength * 2 + 3, 9);
-      cv.adaptiveThreshold(
-        grayMat,
-        edgesMat,
-        255,
-        cv.ADAPTIVE_THRESH_MEAN_C,
-        cv.THRESH_BINARY_INV,
-        edgeBlockSize,
-        5
-      );
-
-      // Overlay dark outlines directly onto the soft sketch base
-      finalDst.create(src.rows, src.cols, cv.CV_8UC1);
-      const sketchData = baseSketch.data;
-      const edgeData = edgesMat.data;
-      const outData = finalDst.data;
-
-      for (let i = 0; i < outData.length; i += 1) {
-        outData[i] = edgeData[i] > 0 ? clamp(sketchData[i] * 0.25) : sketchData[i];
+      for (let iter = 0; iter < 5; iter += 1) {
+        const sums = Array(safeK).fill(0).map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+        for (let i = 0; i < sampleData.length; i += 3) {
+          const r = sampleData[i], g = sampleData[i + 1], b = sampleData[i + 2];
+          let minDist = Infinity, bestCluster = 0;
+          for (let c = 0; c < safeK; c += 1) {
+            const cent = centroids[c];
+            const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
+            if (dist < minDist) { minDist = dist; bestCluster = c; }
+          }
+          sums[bestCluster].r += r; sums[bestCluster].g += g; sums[bestCluster].b += b;
+          sums[bestCluster].count += 1;
+        }
+        for (let c = 0; c < safeK; c += 1) {
+          if (sums[c].count > 0) {
+            centroids[c].r = sums[c].r / sums[c].count;
+            centroids[c].g = sums[c].g / sums[c].count;
+            centroids[c].b = sums[c].b / sums[c].count;
+          }
+        }
       }
 
-      return matToRgba(cv, finalDst);
+      const inputData = src.data, outputData = dst.data;
+      for (let i = 0; i < inputData.length; i += 3) {
+        const r = inputData[i], g = inputData[i + 1], b = inputData[i + 2];
+        let minDist = Infinity, bestCentroid = centroids[0];
+        for (let c = 0; c < safeK; c += 1) {
+          const cent = centroids[c];
+          const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
+          if (dist < minDist) { minDist = dist; bestCentroid = cent; }
+        }
+        outputData[i] = clamp(Math.round(bestCentroid.r));
+        outputData[i + 1] = clamp(Math.round(bestCentroid.g));
+        outputData[i + 2] = clamp(Math.round(bestCentroid.b));
+      }
     } finally {
-      deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, baseSketch, edgesMat, finalDst);
+      deleteMats(sampleMat);
     }
   }
 
-
-function applyGlobalHatching(cv, srcRgba, targetRgba) {
+  function applyGlobalHatching(cv, srcRgba, targetRgba) {
     const grayMat = new cv.Mat();
     try {
-      // 1. Extract true scene luminance from the raw input frame
       cv.cvtColor(srcRgba, grayMat, cv.COLOR_RGBA2GRAY);
-      
-      const rows = targetRgba.rows;
-      const cols = targetRgba.cols;
-      const lumData = grayMat.data;
-      const targetData = targetRgba.data;
-
-      // Configure your procedural pencil grid metrics
-      const hatchSpacing = 5;     // Distance between strokes
-      const hatchThickness = 1;   // Stroke line width
+      const rows = targetRgba.rows, cols = targetRgba.cols;
+      const lumData = grayMat.data, targetData = targetRgba.data;
+      const hatchSpacing = 5, hatchThickness = 1;
 
       for (let r = 0; r < rows; r += 1) {
         for (let c = 0; c < cols; c += 1) {
           const idx = r * cols + c;
           const luminance = lumData[idx];
-
-          // Diagonal coordinate intersection math
           const isPrimaryStroke = (r + c) % hatchSpacing < hatchThickness;
           const isSecondaryStroke = (r - c + cols) % hatchSpacing < hatchThickness;
-
           let shadeFactor = 1.0;
 
-          // Map shading density based on real-world illumination thresholds
           if (luminance < 95) {
-            // Deep shadows: Intersecting grid pattern
-            if (isPrimaryStroke || isSecondaryStroke) {
-              shadeFactor = 0.65;
-            }
+            if (isPrimaryStroke || isSecondaryStroke) shadeFactor = 0.65;
           } else if (luminance < 165) {
-            // Mid-tones: Single-directional parallel lines
-            if (isPrimaryStroke) {
-              shadeFactor = 0.82;
-            }
+            if (isPrimaryStroke) shadeFactor = 0.82;
           }
 
-          // Directly attenuate RGB channels in-place (skipping Alpha at offset +3)
           if (shadeFactor < 1.0) {
             const pIdx = idx * 4;
             targetData[pIdx] = clamp(targetData[pIdx] * shadeFactor);
@@ -311,66 +198,74 @@ function applyGlobalHatching(cv, srcRgba, targetRgba) {
     }
   }
 
-
-function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
-    const hsv = new cv.Mat();
+  function applyProCartoon(cv, src, settings) {
+    const rgbMat = new cv.Mat(), smoothMat = new cv.Mat(), quantizedMat = new cv.Mat();
+    const grayMat = new cv.Mat(), edgesMat = new cv.Mat(), edgesRgb = new cv.Mat();
+    const finalDst = new cv.Mat();
+    const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
+    const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
+    const borderValue = typeof cv.morphologyDefaultBorderValue === 'function' ? cv.morphologyDefaultBorderValue() : new cv.Scalar();
 
     try {
-      cv.cvtColor(src, hsv, cv.COLOR_RGB2HSV);
-      const data = hsv.data;
+      cv.cvtColor(src, rgbMat, cv.COLOR_RGBA2RGB);
+      const smoothingPasses = settings.cartoonSmoothingMode === 'lut-only' ? 0 : settings.cartoonSmoothingMode === 'single-bilateral' ? 1 : 2;
+      edgePreservingSmooth(cv, rgbMat, smoothMat, settings.bilateralDiameter, 30, smoothingPasses);
+      boostColor(cv, smoothMat, smoothMat, 1.4, 1.05, 0);
+      applyKMeansQuantization(cv, smoothMat, quantizedMat, settings.colorQuantization);
 
-      for (let i = 0; i < data.length; i += 3) {
-        data[i + 1] = clamp(data[i + 1] * saturationScale);
-        data[i + 2] = clamp(data[i + 2] * valueScale + valueOffset);
+      cv.cvtColor(rgbMat, grayMat, cv.COLOR_RGB2GRAY);
+      cv.medianBlur(grayMat, grayMat, 5);
+
+      const edgeIntensity = clamp(Math.round(settings.edgeIntensity), 1, 12);
+      const adaptiveBlockSize = oddKernel(settings.bilateralDiameter + settings.edgeBlockSize * 2 + 5, 9);
+      const adaptiveC = clamp(11 - edgeIntensity, 2, 10);
+
+      cv.adaptiveThreshold(grayMat, edgesMat, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, adaptiveBlockSize, adaptiveC);
+      if (edgeThickness > 1) {
+        cv.dilate(edgesMat, edgesMat, kernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, borderValue);
       }
 
-      cv.cvtColor(hsv, dst, cv.COLOR_HSV2RGB);
+      cv.bitwise_not(edgesMat, edgesMat);
+      cv.cvtColor(edgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
+      cv.bitwise_and(quantizedMat, edgesRgb, finalDst);
+      return matToRgba(cv, finalDst);
     } finally {
-      deleteMats(hsv);
+      deleteMats(rgbMat, smoothMat, quantizedMat, grayMat, edgesMat, edgesRgb, finalDst, kernel);
     }
   }
 
+  function applyAdvancedPencil(cv, src, settings) {
+    const grayMat = new cv.Mat(), invertedMat = new cv.Mat(), blurredMat = new cv.Mat();
+    const invertedBlurredMat = new cv.Mat(), baseSketch = new cv.Mat(), edgesMat = new cv.Mat();
+    const finalDst = new cv.Mat();
 
-  function posterizeColors(cv, src, dst, levels) {
-    const safeLevels = clamp(Math.round(levels), 2, 32);
-    dst.create(src.rows, src.cols, cv.CV_8UC3);
-    const step = 255 / (safeLevels - 1);
-    const input = src.data;
-    const output = dst.data;
+    try {
+      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 9));
+      const ksize = oddKernel(blurStrength * 4 + 1, 5);
+      cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
+      cv.bitwise_not(grayMat, invertedMat);
+      cv.GaussianBlur(invertedMat, blurredMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
+      cv.bitwise_not(blurredMat, invertedBlurredMat);
+      cv.divide(grayMat, invertedBlurredMat, baseSketch, 256.0);
 
-    for (let i = 0; i < input.length; i += 3) {
-      output[i] = clamp(Math.round(input[i] / step) * step);
-      output[i + 1] = clamp(Math.round(input[i + 1] / step) * step);
-      output[i + 2] = clamp(Math.round(input[i + 2] / step) * step);
-    }
-  }
+      const edgeBlockSize = oddKernel(blurStrength * 2 + 3, 9);
+      cv.adaptiveThreshold(grayMat, edgesMat, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, edgeBlockSize, 5);
 
-  function overlayInk(cv, color, whiteEdgeMask, dst, strength = 1) {
-    dst.create(color.rows, color.cols, cv.CV_8UC3);
-    const colorData = color.data;
-    const edgeData = whiteEdgeMask.data;
-    const output = dst.data;
-
-    for (let pixel = 0; pixel < edgeData.length; pixel += 1) {
-      const colorIndex = pixel * 3;
-      const ink = clamp(((255 - edgeData[pixel]) / 255) * strength, 0, 1);
-      const keep = 1 - ink;
-      output[colorIndex] = colorData[colorIndex] * keep;
-      output[colorIndex + 1] = colorData[colorIndex + 1] * keep;
-      output[colorIndex + 2] = colorData[colorIndex + 2] * keep;
+      finalDst.create(src.rows, src.cols, cv.CV_8UC1);
+      const sketchData = baseSketch.data, edgeData = edgesMat.data, outData = finalDst.data;
+      for (let i = 0; i < outData.length; i += 1) {
+        outData[i] = edgeData[i] > 0 ? clamp(sketchData[i] * 0.25) : sketchData[i];
+      }
+      return matToRgba(cv, finalDst);
+    } finally {
+      deleteMats(grayMat, invertedMat, blurredMat, invertedBlurredMat, baseSketch, edgesMat, finalDst);
     }
   }
 
   function applyPopArt(cv, src, settings) {
-    const rgb = new cv.Mat();
-    const smooth = new cv.Mat();
-    const gray = new cv.Mat();
-    const edges = new cv.Mat();
-    const whiteLineMask = new cv.Mat();
-    const boosted = new cv.Mat();
-    const colorBase = new cv.Mat();
-    const halftone = new cv.Mat();
-    const pop = new cv.Mat();
+    const rgb = new cv.Mat(), smooth = new cv.Mat(), gray = new cv.Mat();
+    const edges = new cv.Mat(), whiteLineMask = new cv.Mat(), boosted = new cv.Mat();
+    const colorBase = new cv.Mat(), halftone = new cv.Mat(), pop = new cv.Mat();
     const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
     const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
 
@@ -383,36 +278,24 @@ function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
       cv.cvtColor(colorBase, gray, cv.COLOR_RGB2GRAY);
 
       const dotSize = Math.max(4, Math.round(settings.dotSize));
-      const base = colorBase.data;
-      const grayData = gray.data;
+      const base = colorBase.data, grayData = gray.data;
 
       for (let y = 0; y < gray.rows; y += dotSize) {
         for (let x = 0; x < gray.cols; x += dotSize) {
           const cellWidth = Math.min(dotSize, gray.cols - x);
           const cellHeight = Math.min(dotSize, gray.rows - y);
-          let brightness = 0;
-          let red = 0;
-          let green = 0;
-          let blue = 0;
-          let count = 0;
+          let brightness = 0, red = 0, green = 0, blue = 0, count = 0;
 
           for (let yy = 0; yy < cellHeight; yy += 1) {
             for (let xx = 0; xx < cellWidth; xx += 1) {
               const pixelIndex = (y + yy) * gray.cols + x + xx;
               const colorIndex = pixelIndex * 3;
               brightness += grayData[pixelIndex];
-              red += base[colorIndex];
-              green += base[colorIndex + 1];
-              blue += base[colorIndex + 2];
+              red += base[colorIndex]; green += base[colorIndex + 1]; blue += base[colorIndex + 2];
               count += 1;
             }
           }
-
-          brightness /= count;
-          red /= count;
-          green /= count;
-          blue /= count;
-
+          brightness /= count; red /= count; green /= count; blue /= count;
           const darkness = 1 - brightness / 255;
           const radius = Math.round(Math.pow(darkness, 0.7) * dotSize * 0.62);
           if (radius < 1) continue;
@@ -427,332 +310,196 @@ function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
       cv.dilate(edges, edges, kernel);
       cv.bitwise_not(edges, whiteLineMask);
       overlayInk(cv, halftone, whiteLineMask, pop, 1.0);
-
       return matToRgba(cv, pop);
     } finally {
       deleteMats(rgb, smooth, gray, edges, whiteLineMask, kernel, boosted, colorBase, halftone, pop);
     }
   }
 
-// function applyPopArt(cv, src, settings) {
-//   const rgb = new cv.Mat();
-//   const smooth = new cv.Mat();
-//   const boosted = new cv.Mat();
-//   const colorBase = new cv.Mat();
-//   const gray = new cv.Mat();
-//   const edges = new cv.Mat();
-//   const subjectMask = new cv.Mat();
-//   const pop = new cv.Mat();
+  // --- Optimized CPU-based Anisotropic Kuwahara Filter ---
+  function applyOilPainting(cv, src, settings) {
+    const workSrc = new cv.Mat(), rgb = new cv.Mat(), gray = new cv.Mat();
+    const sobelX = new cv.Mat(), sobelY = new cv.Mat();
+    const jxx = new cv.Mat(), jyy = new cv.Mat(), jxy = new cv.Mat();
+    const dst = new cv.Mat();
 
-//   const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize || 2));
-//   const edgeKernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
-
-//   try {
-//     // 1. Convert source to RGB
-//     cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-
-//     // 2. Smooth image so halftone colors do not become noisy/muddy
-//     const diameter = Math.max(7, Math.round(settings.bilateralDiameter || 9));
-//     edgePreservingSmooth(cv, rgb, smooth, diameter, 42, 2);
-
-//     // 3. Boost saturation/contrast for pop-art screen-print color
-//     boostColor(cv, smooth, boosted, 1.65, 1.08, 2);
-
-//     // 4. Posterize / quantize colors into clean flat regions
-//     const kLevels = clamp(Math.round((settings.colorQuantization || 14) / 2), 5, 14);
-//     applyKMeansQuantization(cv, boosted, colorBase, kLevels);
-
-//     // 5. Luminance map for dot size
-//     cv.cvtColor(smooth, gray, cv.COLOR_RGB2GRAY);
-//     cv.medianBlur(gray, gray, 5);
-
-//     // 6. Soft subject mask: keeps dots mainly where image content exists,
-//     // while the rest becomes a clean black background.
-//     cv.threshold(gray, subjectMask, 12, 255, cv.THRESH_BINARY);
-
-//     // 7. Comic ink outlines
-//     const edgeIntensity = clamp(Math.round(settings.edgeIntensity || 6), 1, 12);
-//     const lowThreshold = clamp(95 - edgeIntensity * 5, 28, 85);
-
-//     cv.Canny(gray, edges, lowThreshold, lowThreshold * 2.3, 3, false);
-
-//     if (edgeThickness > 1) {
-//       cv.dilate(edges, edges, edgeKernel);
-//     }
-
-//     // 8. Start with pure black canvas
-//     pop.create(src.rows, src.cols, cv.CV_8UC3);
-//     pop.setTo(new cv.Scalar(0, 0, 0));
-
-//     const cols = src.cols;
-//     const rows = src.rows;
-
-//     const colorData = colorBase.data;
-//     const grayData = gray.data;
-//     const maskData = subjectMask.data;
-
-//     // Dot spacing and scale
-//     const dotSize = Math.max(5, Math.round(settings.dotSize || 8));
-//     const dotGap = Math.max(1, Math.round(dotSize * 0.12));
-//     const maxRadius = Math.max(1, Math.floor((dotSize - dotGap) * 0.48));
-
-//     // Small offset gives a printed-comic staggered halftone feel
-//     let rowCounter = 0;
-
-//     for (let y = 0; y < rows; y += dotSize) {
-//       const xOffset = rowCounter % 2 === 0 ? 0 : Math.floor(dotSize / 2);
-
-//       for (let x = -xOffset; x < cols; x += dotSize) {
-//         const cellX = Math.max(0, x);
-//         const cellY = y;
-
-//         const cellWidth = Math.min(dotSize, cols - cellX);
-//         const cellHeight = Math.min(dotSize, rows - cellY);
-
-//         if (cellWidth <= 0 || cellHeight <= 0) continue;
-
-//         let brightness = 0;
-//         let coverage = 0;
-//         let red = 0;
-//         let green = 0;
-//         let blue = 0;
-//         let count = 0;
-
-//         for (let yy = 0; yy < cellHeight; yy += 1) {
-//           for (let xx = 0; xx < cellWidth; xx += 1) {
-//             const pixelIndex = (cellY + yy) * cols + cellX + xx;
-//             const colorIndex = pixelIndex * 3;
-
-//             brightness += grayData[pixelIndex];
-
-//             if (maskData[pixelIndex] > 0) {
-//               coverage += 1;
-//             }
-
-//             red += colorData[colorIndex];
-//             green += colorData[colorIndex + 1];
-//             blue += colorData[colorIndex + 2];
-
-//             count += 1;
-//           }
-//         }
-
-//         if (count === 0) continue;
-
-//         brightness /= count;
-//         red /= count;
-//         green /= count;
-//         blue /= count;
-
-//         const maskCoverage = coverage / count;
-
-//         // Skip cells with almost no real image content.
-//         // This is what prevents the whole image becoming an ugly dotted sheet.
-//         if (maskCoverage < 0.18) continue;
-
-//         // Hard-mix style thresholding:
-//         // midtones and shadows get larger dots, highlights get smaller dots.
-//         const darkness = 1 - brightness / 255;
-
-//         let radius = 0;
-
-//         if (brightness < 55) {
-//           radius = maxRadius;
-//         } else if (brightness < 115) {
-//           radius = Math.round(maxRadius * 0.9);
-//         } else if (brightness < 175) {
-//           radius = Math.round(maxRadius * 0.65);
-//         } else if (brightness < 225) {
-//           radius = Math.round(maxRadius * 0.38);
-//         } else {
-//           radius = Math.round(maxRadius * 0.18);
-//         }
-
-//         // Slight nonlinear correction for smoother transitions
-//         radius = Math.max(1, Math.round(radius * (0.65 + Math.pow(darkness, 0.65))));
-
-//         if (radius < 1) continue;
-
-//         const centerX = clamp(Math.round(cellX + cellWidth / 2), 0, cols - 1);
-//         const centerY = clamp(Math.round(cellY + cellHeight / 2), 0, rows - 1);
-
-//         // Multiply / Linear Burn inspired color:
-//         // colors remain visible but become punchier inside the dots.
-//         let dotR = red;
-//         let dotG = green;
-//         let dotB = blue;
-
-//         if (brightness < 70) {
-//           dotR = red * 0.38;
-//           dotG = green * 0.38;
-//           dotB = blue * 0.38;
-//         } else if (brightness < 140) {
-//           dotR = red * 0.62;
-//           dotG = green * 0.62;
-//           dotB = blue * 0.62;
-//         } else {
-//           dotR = red * 0.9;
-//           dotG = green * 0.9;
-//           dotB = blue * 0.9;
-//         }
-
-//         cv.circle(
-//           pop,
-//           new cv.Point(centerX, centerY),
-//           radius,
-//           new cv.Scalar(
-//             clamp(dotR),
-//             clamp(dotG),
-//             clamp(dotB)
-//           ),
-//           -1,
-//           cv.LINE_AA
-//         );
-//       }
-
-//       rowCounter += 1;
-//     }
-
-//     // 9. Add strong black comic outlines over the colored dot matrix
-//     const popData = pop.data;
-//     const edgeData = edges.data;
-
-//     for (let i = 0; i < edgeData.length; i += 1) {
-//       if (edgeData[i] > 0) {
-//         const p = i * 3;
-//         popData[p] = 0;
-//         popData[p + 1] = 0;
-//         popData[p + 2] = 0;
-//       }
-//     }
-
-//     return matToRgba(cv, pop);
-//   } finally {
-//     deleteMats(
-//       rgb,
-//       smooth,
-//       boosted,
-//       colorBase,
-//       gray,
-//       edges,
-//       subjectMask,
-//       pop,
-//       edgeKernel
-//     );
-//   }
-// }
-
-function applyKMeansQuantization(cv, src, dst, kLevels) {
-    const safeK = clamp(Math.round(kLevels), 2, 32);
-    dst.create(src.rows, src.cols, cv.CV_8UC3);
-
-    // 1. Shrink image to extract representative color samples instantly
-    const sampleMat = new cv.Mat();
     try {
-      cv.resize(src, sampleMat, new cv.Size(80, 80), 0, 0, cv.INTER_AREA);
-      const sampleData = sampleMat.data;
-      const numSamples = sampleData.length / 3;
+      // 1. Cap internal processing resolution to guarantee fast framerates
+      const targetWidth = Math.min(src.cols, 400);
+      const scale = targetWidth / src.cols;
+      const targetHeight = Math.max(1, Math.round(src.rows * scale));
 
-      // 2. Initialize K centroids evenly across the sample pool
-      const centroids = [];
-      const step = Math.max(1, Math.floor(numSamples / safeK));
-      for (let i = 0; i < safeK; i += 1) {
-        const idx = i * step * 3;
-        centroids.push({
-          r: sampleData[idx],
-          g: sampleData[idx + 1],
-          b: sampleData[idx + 2],
-        });
+      cv.resize(src, workSrc, new cv.Size(targetWidth, targetHeight), 0, 0, cv.INTER_AREA);
+      cv.cvtColor(workSrc, rgb, cv.COLOR_RGBA2RGB);
+
+      // Saturate paint colors slightly to enrich pigments
+      boostColor(cv, rgb, rgb, 1.35, 1.05, 0);
+      cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+
+      // 2. Compute Structure Tensor Gradients natively
+      cv.Sobel(gray, sobelX, cv.CV_32F, 1, 0, 3);
+      cv.Sobel(gray, sobelY, cv.CV_32F, 0, 1, 3);
+
+      cv.multiply(sobelX, sobelX, jxx);
+      cv.multiply(sobelY, sobelY, jyy);
+      cv.multiply(sobelX, sobelY, jxy);
+
+      // Gaussian integration smoothes the local orientation flow map
+      const radius = clamp(Math.round(settings.bilateralDiameter || 5), 2, 8);
+      const blurSize = oddKernel(radius + 2, 5);
+      cv.GaussianBlur(jxx, jxx, new cv.Size(blurSize, blurSize), 0, 0);
+      cv.GaussianBlur(jyy, jyy, new cv.Size(blurSize, blurSize), 0, 0);
+      cv.GaussianBlur(jxy, jxy, new cv.Size(blurSize, blurSize), 0, 0);
+
+      // 3. Precompute rotated directional sector offsets caching
+      if (!self.__kuwaharaSectorsCache) {
+        self.__kuwaharaSectorsCache = {};
+      }
+      const cacheKey = radius;
+      if (!self.__kuwaharaSectorsCache[cacheKey]) {
+        const numAngles = 16;
+        const cachedAngles = [];
+        for (let a = 0; a < numAngles; a += 1) {
+          const phi = (a / numAngles) * Math.PI;
+          const cosP = Math.cos(phi);
+          const sinP = Math.sin(phi);
+          const sectors = [];
+
+          const quadrants = [
+            { uMin: 0, uMax: radius, vMin: 0, vMax: radius },
+            { uMin: -radius, uMax: 0, vMin: 0, vMax: radius },
+            { uMin: -radius, uMax: 0, vMin: -radius, vMax: 0 },
+            { uMin: 0, uMax: radius, vMin: -radius, vMax: 0 },
+          ];
+
+          for (let q = 0; q < 4; q += 1) {
+            const offsets = [];
+            const seen = new Set();
+            const quad = quadrants[q];
+            for (let v = quad.vMin; v <= quad.vMax; v += 1) {
+              for (let u = quad.uMin; u <= quad.uMax; u += 1) {
+                const dx = Math.round(u * cosP - v * sinP);
+                const dy = Math.round(u * sinP + v * cosP);
+                const key = `${dx},${dy}`;
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  offsets.push({ dx, dy });
+                }
+              }
+            }
+            sectors.push(offsets);
+          }
+          cachedAngles.push(sectors);
+        }
+        self.__kuwaharaSectorsCache[cacheKey] = cachedAngles;
       }
 
-      // 3. Run a lightweight K-Means loop (5 iterations ensures strong convergence)
-      const maxIterations = 5;
-      for (let iter = 0; iter < maxIterations; iter += 1) {
-        const sums = Array(safeK).fill(0).map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+      const cachedSectors = self.__kuwaharaSectorsCache[cacheKey];
+      dst.create(targetHeight, targetWidth, cv.CV_8UC3);
 
-        for (let i = 0; i < sampleData.length; i += 3) {
-          const r = sampleData[i];
-          const g = sampleData[i + 1];
-          const b = sampleData[i + 2];
+      const srcData = rgb.data;
+      const dstData = dst.data;
+      const jxxData = jxx.data32F;
+      const jyyData = jyy.data32F;
+      const jxyData = jxy.data32F;
 
-          let minDist = Infinity;
-          let bestCluster = 0;
-          for (let c = 0; c < safeK; c += 1) {
-            const cent = centroids[c];
-            const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
-            if (dist < minDist) {
-              minDist = dist;
-              bestCluster = c;
+      const width = targetWidth;
+      const height = targetHeight;
+      const numAngles = 16;
+
+      // 4. Ultra-fast Single-Pass Sector Loop
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const pIdx = y * width + x;
+          const E = jxxData[pIdx];
+          const G = jyyData[pIdx];
+          const F = jxyData[pIdx];
+
+          // Tangent orientation alignment (perpendicular to gradient)
+          const twoTheta = Math.atan2(2 * F, E - G);
+          let phi = twoTheta / 2 + Math.PI / 2;
+          if (phi < 0) phi += Math.PI;
+          if (phi >= Math.PI) phi -= Math.PI;
+
+          const angleBin = Math.floor((phi / Math.PI) * numAngles) % numAngles;
+          const sectors = cachedSectors[angleBin];
+
+          let minVariance = Infinity;
+          let bestR = 0, bestG = 0, bestB = 0;
+
+          // Process the 4 directional sub-regions using single-pass variance math
+          for (let s = 0; s < 4; s += 1) {
+            const offsets = sectors[s];
+            const len = offsets.length;
+            let sumR = 0, sumG = 0, sumB = 0;
+            let sumSqR = 0, sumSqG = 0, sumSqB = 0;
+            let count = 0;
+
+            for (let i = 0; i < len; i += 1) {
+              const off = offsets[i];
+              const sx = x + off.dx;
+              const sy = y + off.dy;
+              if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                const idx = (sy * width + sx) * 3;
+                const r = srcData[idx], g = srcData[idx + 1], b = srcData[idx + 2];
+                sumR += r; sumG += g; sumB += b;
+                sumSqR += r * r; sumSqG += g * g; sumSqB += b * b;
+                count += 1;
+              }
+            }
+
+            if (count > 0) {
+              const meanR = sumR / count;
+              const meanG = sumG / count;
+              const meanB = sumB / count;
+
+              // Var = E[X^2] - (E[X])^2
+              const varR = sumSqR / count - meanR * meanR;
+              const varG = sumSqG / count - meanG * meanG;
+              const varB = sumSqB / count - meanB * meanB;
+              const totalVar = varR + varG + varB;
+
+              if (totalVar < minVariance) {
+                minVariance = totalVar;
+                bestR = meanR; bestG = meanG; bestB = meanB;
+              }
             }
           }
 
-          sums[bestCluster].r += r;
-          sums[bestCluster].g += g;
-          sums[bestCluster].b += b;
-          sums[bestCluster].count += 1;
-        }
-
-        // Update centroids to their new center of mass
-        for (let c = 0; c < safeK; c += 1) {
-          if (sums[c].count > 0) {
-            centroids[c].r = sums[c].r / sums[c].count;
-            centroids[c].g = sums[c].g / sums[c].count;
-            centroids[c].b = sums[c].b / sums[c].count;
-          }
+          const outIdx = pIdx * 3;
+          dstData[outIdx] = bestR;
+          dstData[outIdx + 1] = bestG;
+          dstData[outIdx + 2] = bestB;
         }
       }
 
-      // 4. Map the full smoothed source image directly to the converged centroids
-      const inputData = src.data;
-      const outputData = dst.data;
-
-      for (let i = 0; i < inputData.length; i += 3) {
-        const r = inputData[i];
-        const g = inputData[i + 1];
-        const b = inputData[i + 2];
-
-        let minDist = Infinity;
-        let bestCentroid = centroids[0];
-
-        for (let c = 0; c < safeK; c += 1) {
-          const cent = centroids[c];
-          const dist = (r - cent.r) * (r - cent.r) + (g - cent.g) * (g - cent.g) + (b - cent.b) * (b - cent.b);
-          if (dist < minDist) {
-            minDist = dist;
-            bestCentroid = cent;
-          }
-        }
-
-        outputData[i] = clamp(Math.round(bestCentroid.r));
-        outputData[i + 1] = clamp(Math.round(bestCentroid.g));
-        outputData[i + 2] = clamp(Math.round(bestCentroid.b));
-      }
+      // Smoothly upscale back to standard rendering dimensions
+      cv.resize(dst, dst, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_LINEAR);
+      return matToRgba(cv, dst);
     } finally {
-      deleteMats(sampleMat);
+      deleteMats(workSrc, rgb, gray, sobelX, sobelY, jxx, jyy, jxy, dst);
     }
   }
 
-
-
   function applyFilter(cv, src, settings) {
     let result;
-
-    // 1. Generate base filter graphics
     if (settings.mode === 'pencil') {
       result = applyAdvancedPencil(cv, src, settings);
     } else if (settings.mode === 'popart') {
       result = applyPopArt(cv, src, settings);
+    } else if (settings.mode === 'oilpainting') {
+      result = applyOilPainting(cv, src, settings);
     } else {
       result = applyProCartoon(cv, src, settings);
     }
 
-    // 2. Stamp the dynamic directional shading grid ONLY on non-PopArt modes
-    if (settings.mode !== 'popart') {
+    // Explicitly restrict cross-hatching to cartoon/pencil lines to avoid muddying smooth oil textures
+    if (settings.mode === 'cartoon' || settings.mode === 'pencil') {
       applyGlobalHatching(cv, src, result);
     }
-
     return result;
   }
+
   globalScope.CartoonifierFilters = {
     applyFilter,
     deleteMats,
