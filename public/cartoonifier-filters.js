@@ -1,34 +1,44 @@
 (function registerCartoonifierFilters(globalScope) {
-  function deleteMats(...mats) {
+
+  // need to free memory allocated by opencv since
+  // it's c++ compiled to wasm so no garbage collector
+  // need to free ourserlves for that reason
+
+  function deleteMats(...mats) { // REST operator
     for (const mat of mats) {
-      if (mat && typeof mat.delete === 'function') {
+
+      // check if null/undefined AND object if object has a function called delete 
+      if (mat && typeof mat.delete === 'function') { // short circuit eval
         mat.delete();
       }
     }
   }
 
+  // min and max are default parameters for ease of use
   function clamp(value, min = 0, max = 255) {
-    return Math.max(min, Math.min(max, value));
+    return Math.max(min, Math.min(max, value)); // ensure value is within 0 to 255
   }
 
+  //force the kernel size to be Odd no matter the user input
   function oddKernel(value, min = 3) {
     const rounded = Math.max(min, Math.round(value));
     return rounded % 2 === 0 ? rounded + 1 : rounded;
   }
 
+  // convert <format> to RGBA since canvas only takes RGBA
   function matToRgba(cv, mat) {
     const dst = new cv.Mat();
-    if (mat.type() === cv.CV_8UC4) {
+    if (mat.type() === cv.CV_8UC4) { // 8 bit, 4 channels (RGBA)
       mat.copyTo(dst);
-    } else if (mat.type() === cv.CV_8UC3) {
+    } else if (mat.type() === cv.CV_8UC3) { //8 bit, 3 channels (RGB)
       cv.cvtColor(mat, dst, cv.COLOR_RGB2RGBA);
-    } else if (mat.type() === cv.CV_8UC1) {
+    } else if (mat.type() === cv.CV_8UC1) { // 8 bits, 1 channel (Grey scale)
       cv.cvtColor(mat, dst, cv.COLOR_GRAY2RGBA);
     } else {
       const converted = new cv.Mat();
       try {
-        mat.convertTo(converted, cv.CV_8U);
-        cv.cvtColor(converted, dst, cv.COLOR_GRAY2RGBA);
+        mat.convertTo(converted, cv.CV_8U); //force convert to 8-bit
+        cv.cvtColor(converted, dst, cv.COLOR_GRAY2RGBA); //convert to rgba
       } finally {
         deleteMats(converted);
       }
@@ -36,6 +46,7 @@
     return dst;
   }
 
+  
   function edgePreservingSmooth(cv, src, dst, spatialRadius, colorRadius, passCount = 2) {
     if (passCount <= 0) {
       src.copyTo(dst);
