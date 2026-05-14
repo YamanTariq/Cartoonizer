@@ -184,8 +184,7 @@
 
   }
 
-
-  function applyAdvancedPencil(cv, src, settings) {
+function applyAdvancedPencil(cv, src, settings) {
     const grayMat = new cv.Mat();
     const invertedMat = new cv.Mat();
     const blurredMat = new cv.Mat();
@@ -193,7 +192,7 @@
     const finalDst = new cv.Mat();
 
     try {
-      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter));
+      const blurStrength = Math.max(1, Math.round(settings.bilateralDiameter || 5));
       const ksize = oddKernel(blurStrength * 4 + 1, 5);
 
       cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
@@ -208,9 +207,9 @@
     }
   }
 
-  function boostColor(cv, src, saturationScale, valueScale, valueOffset) {
+
+function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
     const hsv = new cv.Mat();
-    const dst = new cv.Mat();
 
     try {
       cv.cvtColor(src, hsv, cv.COLOR_RGB2HSV);
@@ -222,15 +221,14 @@
       }
 
       cv.cvtColor(hsv, dst, cv.COLOR_HSV2RGB);
-      return dst;
     } finally {
       deleteMats(hsv);
     }
   }
 
-  function posterizeColors(cv, src, levels) {
+  function posterizeColors(cv, src, dst, levels) {
     const safeLevels = clamp(Math.round(levels), 2, 32);
-    const dst = new cv.Mat(src.rows, src.cols, cv.CV_8UC3);
+    dst.create(src.rows, src.cols, cv.CV_8UC3);
     const step = 255 / (safeLevels - 1);
     const input = src.data;
     const output = dst.data;
@@ -240,12 +238,10 @@
       output[i + 1] = clamp(Math.round(input[i + 1] / step) * step);
       output[i + 2] = clamp(Math.round(input[i + 2] / step) * step);
     }
-
-    return dst;
   }
 
-  function overlayInk(cv, color, whiteEdgeMask, strength = 1) {
-    const dst = new cv.Mat(color.rows, color.cols, cv.CV_8UC3);
+  function overlayInk(cv, color, whiteEdgeMask, dst, strength = 1) {
+    dst.create(color.rows, color.cols, cv.CV_8UC3);
     const colorData = color.data;
     const edgeData = whiteEdgeMask.data;
     const output = dst.data;
@@ -258,8 +254,6 @@
       output[colorIndex + 1] = colorData[colorIndex + 1] * keep;
       output[colorIndex + 2] = colorData[colorIndex + 2] * keep;
     }
-
-    return dst;
   }
 
   function applyPopArt(cv, src, settings) {
@@ -268,19 +262,18 @@
     const gray = new cv.Mat();
     const edges = new cv.Mat();
     const whiteLineMask = new cv.Mat();
+    const boosted = new cv.Mat();
+    const colorBase = new cv.Mat();
+    const halftone = new cv.Mat();
+    const pop = new cv.Mat();
     const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
     const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
-    let boosted = null;
-    let colorBase = null;
-    let halftone = null;
-    let pop = null;
 
     try {
       cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
       edgePreservingSmooth(cv, rgb, smooth, 8, 24);
-      boosted = boostColor(cv, smooth, 1.35, 0.9, -10);
-      colorBase = posterizeColors(cv, boosted, clamp(Math.round(settings.colorQuantization / 3), 3, 10));
-      halftone = new cv.Mat();
+      boostColor(cv, smooth, boosted, 1.35, 0.9, -10);
+      posterizeColors(cv, boosted, colorBase, clamp(Math.round(settings.colorQuantization / 3), 3, 10));
       colorBase.copyTo(halftone);
       cv.cvtColor(colorBase, gray, cv.COLOR_RGB2GRAY);
 
@@ -328,13 +321,14 @@
       cv.Canny(gray, edges, lowThreshold, lowThreshold * 2.2, 3, false);
       cv.dilate(edges, edges, kernel);
       cv.bitwise_not(edges, whiteLineMask);
-      pop = overlayInk(cv, halftone, whiteLineMask, 1.0);
+      overlayInk(cv, halftone, whiteLineMask, pop, 1.0);
 
       return matToRgba(cv, pop);
     } finally {
       deleteMats(rgb, smooth, gray, edges, whiteLineMask, kernel, boosted, colorBase, halftone, pop);
     }
   }
+
 
   function applyFilter(cv, src, settings) {
     if (settings.mode === 'pencil') {
