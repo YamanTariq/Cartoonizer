@@ -317,11 +317,16 @@
   }
 
   // --- Optimized CPU-based Anisotropic Kuwahara Filter ---
+// --- Optimized CPU-based Anisotropic Kuwahara Filter with Optional Edge Overlay ---
   function applyOilPainting(cv, src, settings) {
     const workSrc = new cv.Mat(), rgb = new cv.Mat(), gray = new cv.Mat();
     const sobelX = new cv.Mat(), sobelY = new cv.Mat();
     const jxx = new cv.Mat(), jyy = new cv.Mat(), jxy = new cv.Mat();
     const dst = new cv.Mat();
+    
+    // Mat containers for the optional edge overlay logic
+    const edgesMat = new cv.Mat(), edgesRgb = new cv.Mat();
+    let kernel = null;
 
     try {
       // 1. Cap internal processing resolution to guarantee fast framerates
@@ -473,13 +478,39 @@
         }
       }
 
+      // --- 5. Apply Optional Edge Overlay ---
+      if (settings.kuwaharaEdgeOverlay) {
+        // Remove surface noise from the grayscale source
+        cv.medianBlur(gray, gray, 5);
+
+        const edgeIntensity = clamp(Math.round(settings.edgeIntensity || 5), 1, 12);
+        const edgeBlock = oddKernel((settings.bilateralDiameter || 5) + (settings.edgeBlockSize || 2) * 2 + 5, 9);
+        const adaptiveC = clamp(11 - edgeIntensity, 2, 10);
+
+        // Extract clean ink outlines via adaptive thresholding
+        cv.adaptiveThreshold(gray, edgesMat, 255, cv.ADAPTIVE_THRESH_MEAN_C, cv.THRESH_BINARY_INV, edgeBlock, adaptiveC);
+
+        const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize || 2));
+        if (edgeThickness > 1) {
+          kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
+          const borderValue = typeof cv.morphologyDefaultBorderValue === 'function' ? cv.morphologyDefaultBorderValue() : new cv.Scalar();
+          cv.dilate(edgesMat, edgesMat, kernel, new cv.Point(-1, -1), 1, cv.BORDER_CONSTANT, borderValue);
+        }
+
+        // Invert back to black lines on white mask, convert to RGB, and combine
+        cv.bitwise_not(edgesMat, edgesMat);
+        cv.cvtColor(edgesMat, edgesRgb, cv.COLOR_GRAY2RGB);
+        cv.bitwise_and(dst, edgesRgb, dst);
+      }
+
       // Smoothly upscale back to standard rendering dimensions
       cv.resize(dst, dst, new cv.Size(src.cols, src.rows), 0, 0, cv.INTER_LINEAR);
       return matToRgba(cv, dst);
     } finally {
-      deleteMats(workSrc, rgb, gray, sobelX, sobelY, jxx, jyy, jxy, dst);
+      deleteMats(workSrc, rgb, gray, sobelX, sobelY, jxx, jyy, jxy, dst, edgesMat, edgesRgb);
+      if (kernel) deleteMats(kernel);
     }
-  }
+  } 
 
   function applyFilter(cv, src, settings) {
     let result;

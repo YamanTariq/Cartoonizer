@@ -25,6 +25,7 @@ const defaultSettings = {
   edgeIntensity: 5,
   colorQuantization: 24,
   dotSize: 10,
+  kuwaharaEdgeOverlay: false,
 };
 
 const modeLabels = {
@@ -793,6 +794,40 @@ export default function App() {
                   value={settings.bilateralDiameter}
                   onChange={(value) => setSettings((current) => ({ ...current, bilateralDiameter: value }))}
                 />
+                
+                {/* --- Added Edge Overlay Toggle Controls --- */}
+                <label className="flex cursor-pointer items-center justify-between gap-2 rounded border border-white/10 bg-white/[0.04] p-3 hover:bg-white/[0.06]">
+                  <span className="text-sm text-slate-200">Overlay Edges</span>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-white/10 bg-slate-950 accent-cyan-300"
+                    checked={settings.kuwaharaEdgeOverlay}
+                    onChange={(event) =>
+                      setSettings((current) => ({ ...current, kuwaharaEdgeOverlay: event.target.checked }))
+                    }
+                  />
+                </label>
+
+                {/* Show edge adjustment sliders if the overlay is enabled */}
+                {settings.kuwaharaEdgeOverlay && (
+                  <>
+                    <Slider
+                      label="Edge Thickness"
+                      min={1}
+                      max={7}
+                      step={1}
+                      value={settings.edgeBlockSize}
+                      onChange={(value) => setSettings((current) => ({ ...current, edgeBlockSize: value }))}
+                    />
+                    <Slider
+                      label="Edge Intensity"
+                      min={2}
+                      max={10}
+                      value={settings.edgeIntensity}
+                      onChange={(value) => setSettings((current) => ({ ...current, edgeIntensity: value }))}
+                    />
+                  </>
+                )}
               </>
             )}
           </div>

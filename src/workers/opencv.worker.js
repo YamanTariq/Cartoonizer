@@ -10,6 +10,7 @@ const defaultSettings = {
   edgeIntensity: 5,
   colorQuantization: 24,
   dotSize: 10,
+  kuwaharaEdgeOverlay: false,
 };
 
 let cvReady = false;
@@ -78,6 +79,10 @@ function normalizeSettings(nextSettings) {
     bilateralDiameter: Math.max(1, Math.round(nextSettings.bilateralDiameter ?? settings.bilateralDiameter)),
     colorQuantization: Math.max(2, Math.round(nextSettings.colorQuantization ?? settings.colorQuantization)),
     dotSize: Math.max(2, Math.round(nextSettings.dotSize ?? settings.dotSize)),
+    anisotropicBrushSize: Math.max(3, Math.round(nextSettings.anisotropicBrushSize ?? settings.anisotropicBrushSize)),
+    pigmentSaturation: Math.max(0.6, Number(nextSettings.pigmentSaturation ?? settings.pigmentSaturation)),
+    flowSmoothness: Math.max(1, Math.round(nextSettings.flowSmoothness ?? settings.flowSmoothness)),
+    edgeOverlay: Boolean(nextSettings.edgeOverlay ?? settings.edgeOverlay),
     cartoonSmoothingMode: nextSettings.cartoonSmoothingMode ?? settings.cartoonSmoothingMode,
   };
 }
