@@ -434,6 +434,214 @@ function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
     }
   }
 
+// function applyPopArt(cv, src, settings) {
+//   const rgb = new cv.Mat();
+//   const smooth = new cv.Mat();
+//   const boosted = new cv.Mat();
+//   const colorBase = new cv.Mat();
+//   const gray = new cv.Mat();
+//   const edges = new cv.Mat();
+//   const subjectMask = new cv.Mat();
+//   const pop = new cv.Mat();
+
+//   const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize || 2));
+//   const edgeKernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U);
+
+//   try {
+//     // 1. Convert source to RGB
+//     cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+
+//     // 2. Smooth image so halftone colors do not become noisy/muddy
+//     const diameter = Math.max(7, Math.round(settings.bilateralDiameter || 9));
+//     edgePreservingSmooth(cv, rgb, smooth, diameter, 42, 2);
+
+//     // 3. Boost saturation/contrast for pop-art screen-print color
+//     boostColor(cv, smooth, boosted, 1.65, 1.08, 2);
+
+//     // 4. Posterize / quantize colors into clean flat regions
+//     const kLevels = clamp(Math.round((settings.colorQuantization || 14) / 2), 5, 14);
+//     applyKMeansQuantization(cv, boosted, colorBase, kLevels);
+
+//     // 5. Luminance map for dot size
+//     cv.cvtColor(smooth, gray, cv.COLOR_RGB2GRAY);
+//     cv.medianBlur(gray, gray, 5);
+
+//     // 6. Soft subject mask: keeps dots mainly where image content exists,
+//     // while the rest becomes a clean black background.
+//     cv.threshold(gray, subjectMask, 12, 255, cv.THRESH_BINARY);
+
+//     // 7. Comic ink outlines
+//     const edgeIntensity = clamp(Math.round(settings.edgeIntensity || 6), 1, 12);
+//     const lowThreshold = clamp(95 - edgeIntensity * 5, 28, 85);
+
+//     cv.Canny(gray, edges, lowThreshold, lowThreshold * 2.3, 3, false);
+
+//     if (edgeThickness > 1) {
+//       cv.dilate(edges, edges, edgeKernel);
+//     }
+
+//     // 8. Start with pure black canvas
+//     pop.create(src.rows, src.cols, cv.CV_8UC3);
+//     pop.setTo(new cv.Scalar(0, 0, 0));
+
+//     const cols = src.cols;
+//     const rows = src.rows;
+
+//     const colorData = colorBase.data;
+//     const grayData = gray.data;
+//     const maskData = subjectMask.data;
+
+//     // Dot spacing and scale
+//     const dotSize = Math.max(5, Math.round(settings.dotSize || 8));
+//     const dotGap = Math.max(1, Math.round(dotSize * 0.12));
+//     const maxRadius = Math.max(1, Math.floor((dotSize - dotGap) * 0.48));
+
+//     // Small offset gives a printed-comic staggered halftone feel
+//     let rowCounter = 0;
+
+//     for (let y = 0; y < rows; y += dotSize) {
+//       const xOffset = rowCounter % 2 === 0 ? 0 : Math.floor(dotSize / 2);
+
+//       for (let x = -xOffset; x < cols; x += dotSize) {
+//         const cellX = Math.max(0, x);
+//         const cellY = y;
+
+//         const cellWidth = Math.min(dotSize, cols - cellX);
+//         const cellHeight = Math.min(dotSize, rows - cellY);
+
+//         if (cellWidth <= 0 || cellHeight <= 0) continue;
+
+//         let brightness = 0;
+//         let coverage = 0;
+//         let red = 0;
+//         let green = 0;
+//         let blue = 0;
+//         let count = 0;
+
+//         for (let yy = 0; yy < cellHeight; yy += 1) {
+//           for (let xx = 0; xx < cellWidth; xx += 1) {
+//             const pixelIndex = (cellY + yy) * cols + cellX + xx;
+//             const colorIndex = pixelIndex * 3;
+
+//             brightness += grayData[pixelIndex];
+
+//             if (maskData[pixelIndex] > 0) {
+//               coverage += 1;
+//             }
+
+//             red += colorData[colorIndex];
+//             green += colorData[colorIndex + 1];
+//             blue += colorData[colorIndex + 2];
+
+//             count += 1;
+//           }
+//         }
+
+//         if (count === 0) continue;
+
+//         brightness /= count;
+//         red /= count;
+//         green /= count;
+//         blue /= count;
+
+//         const maskCoverage = coverage / count;
+
+//         // Skip cells with almost no real image content.
+//         // This is what prevents the whole image becoming an ugly dotted sheet.
+//         if (maskCoverage < 0.18) continue;
+
+//         // Hard-mix style thresholding:
+//         // midtones and shadows get larger dots, highlights get smaller dots.
+//         const darkness = 1 - brightness / 255;
+
+//         let radius = 0;
+
+//         if (brightness < 55) {
+//           radius = maxRadius;
+//         } else if (brightness < 115) {
+//           radius = Math.round(maxRadius * 0.9);
+//         } else if (brightness < 175) {
+//           radius = Math.round(maxRadius * 0.65);
+//         } else if (brightness < 225) {
+//           radius = Math.round(maxRadius * 0.38);
+//         } else {
+//           radius = Math.round(maxRadius * 0.18);
+//         }
+
+//         // Slight nonlinear correction for smoother transitions
+//         radius = Math.max(1, Math.round(radius * (0.65 + Math.pow(darkness, 0.65))));
+
+//         if (radius < 1) continue;
+
+//         const centerX = clamp(Math.round(cellX + cellWidth / 2), 0, cols - 1);
+//         const centerY = clamp(Math.round(cellY + cellHeight / 2), 0, rows - 1);
+
+//         // Multiply / Linear Burn inspired color:
+//         // colors remain visible but become punchier inside the dots.
+//         let dotR = red;
+//         let dotG = green;
+//         let dotB = blue;
+
+//         if (brightness < 70) {
+//           dotR = red * 0.38;
+//           dotG = green * 0.38;
+//           dotB = blue * 0.38;
+//         } else if (brightness < 140) {
+//           dotR = red * 0.62;
+//           dotG = green * 0.62;
+//           dotB = blue * 0.62;
+//         } else {
+//           dotR = red * 0.9;
+//           dotG = green * 0.9;
+//           dotB = blue * 0.9;
+//         }
+
+//         cv.circle(
+//           pop,
+//           new cv.Point(centerX, centerY),
+//           radius,
+//           new cv.Scalar(
+//             clamp(dotR),
+//             clamp(dotG),
+//             clamp(dotB)
+//           ),
+//           -1,
+//           cv.LINE_AA
+//         );
+//       }
+
+//       rowCounter += 1;
+//     }
+
+//     // 9. Add strong black comic outlines over the colored dot matrix
+//     const popData = pop.data;
+//     const edgeData = edges.data;
+
+//     for (let i = 0; i < edgeData.length; i += 1) {
+//       if (edgeData[i] > 0) {
+//         const p = i * 3;
+//         popData[p] = 0;
+//         popData[p + 1] = 0;
+//         popData[p + 2] = 0;
+//       }
+//     }
+
+//     return matToRgba(cv, pop);
+//   } finally {
+//     deleteMats(
+//       rgb,
+//       smooth,
+//       boosted,
+//       colorBase,
+//       gray,
+//       edges,
+//       subjectMask,
+//       pop,
+//       edgeKernel
+//     );
+//   }
+// }
+
 function applyKMeansQuantization(cv, src, dst, kLevels) {
     const safeK = clamp(Math.round(kLevels), 2, 32);
     dst.create(src.rows, src.cols, cv.CV_8UC3);
@@ -525,7 +733,8 @@ function applyKMeansQuantization(cv, src, dst, kLevels) {
   }
 
 
-function applyFilter(cv, src, settings) {
+
+  function applyFilter(cv, src, settings) {
     let result;
 
     // 1. Generate base filter graphics
@@ -537,13 +746,13 @@ function applyFilter(cv, src, settings) {
       result = applyProCartoon(cv, src, settings);
     }
 
-    // 2. Stamp the dynamic directional shading grid globally
-    applyGlobalHatching(cv, src, result);
+    // 2. Stamp the dynamic directional shading grid ONLY on non-PopArt modes
+    if (settings.mode !== 'popart') {
+      applyGlobalHatching(cv, src, result);
+    }
 
     return result;
   }
-
-
   globalScope.CartoonifierFilters = {
     applyFilter,
     deleteMats,
