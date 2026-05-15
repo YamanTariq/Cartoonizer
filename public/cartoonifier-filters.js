@@ -46,20 +46,27 @@
     return dst;
   }
 
-  
+  //apply bilateral filter: edge preserving, noise-removing smoothing filter
+  // checks [1] space: how close pixels are and [2] color: how similar are colors
   function edgePreservingSmooth(cv, src, dst, spatialRadius, colorRadius, passCount = 2) {
     if (passCount <= 0) {
       src.copyTo(dst);
       return;
     }
-    const smallWidth = Math.max(1, Math.floor(src.cols * 0.5));
-    const smallHeight = Math.max(1, Math.floor(src.rows * 0.5));
+    // Down-sample the image to half size since bilateral filter is mathematically expensive
+    // we calculate the width and height of the smaller image first
+    const smallWidth = Math.max(1, Math.floor(src.cols * 0.5));  //can't be less than 1
+    const smallHeight = Math.max(1, Math.floor(src.rows * 0.5)); //can't be less than 1
     const smallSrc = new cv.Mat();
     const smallDst = new cv.Mat();
     const temp = new cv.Mat();
 
     try {
-      cv.resize(src, smallSrc, new cv.Size(smallWidth, smallHeight), 0, 0, cv.INTER_LINEAR);
+      //bilinear interpolation used because it's fast and gives good results
+      // calculates 2x2 matrix, finds average color and creates new result pixel
+      //       src      dest        dimentions       scale factors:  fx fy  
+      cv.resize(src, smallSrc, new cv.Size(smallWidth, smallHeight), 0, 0, cv.INTER_LINEAR); // perform bilinear interpolation
+
       const diameter = oddKernel(spatialRadius, 5);
       const sigmaColor = Math.max(35, colorRadius * 2.4);
       const sigmaSpace = Math.max(16, spatialRadius * 2.2);
