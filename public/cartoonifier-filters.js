@@ -67,13 +67,16 @@
       //       src      dest        dimentions       scale factors:  fx fy  
       cv.resize(src, smallSrc, new cv.Size(smallWidth, smallHeight), 0, 0, cv.INTER_LINEAR); // perform bilinear interpolation
 
-      const diameter = oddKernel(spatialRadius, 5);
-      const sigmaColor = Math.max(35, colorRadius * 2.4);
-      const sigmaSpace = Math.max(16, spatialRadius * 2.2);
+      const diameter = oddKernel(spatialRadius, 5); // make sure kernel size is odd
+      const sigmaColor = Math.max(35, colorRadius * 2.4); // larger value means more bluring of different colors, small value means less blur or diff color
+      const sigmaSpace = Math.max(16, spatialRadius * 2.2); // larger= far away pixel also affect center, small= less affect center
 
       if (passCount === 1) {
+        //single bilateralFilter is more performative but gives less smooth textures
+        //                  src        dest      kernel                           also handle border pixels
         cv.bilateralFilter(smallSrc, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       } else {
+        // double BilateralFilter is compute heavy but gives perfect flat texture
         cv.bilateralFilter(smallSrc, temp, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
         cv.bilateralFilter(temp, smallDst, diameter, sigmaColor, sigmaSpace, cv.BORDER_DEFAULT);
       }
@@ -84,14 +87,20 @@
   }
 
   // boost saturation and value (brightness) to make colors pop
+  // we can't use RGB here since simply multiplying the values can change the color
+  // but we only want to change saturation
+  // using HSV is better because it separates saturation and brightness from the Hue
+  // now we can increase the Saturation easily and make color pop without messing original color
   function boostColor(cv, src, dst, saturationScale, valueScale, valueOffset) {
     const hsv = new cv.Mat(); // holds hue, saturation, value image
     try {
       cv.cvtColor(src, hsv, cv.COLOR_RGB2HSV); // convert to hsv since it separates color from brightness
       const data = hsv.data; // direct access to pixel array for speed
+
+      // faster than built in function since we only directly change saturation and value(brightness)
       for (let i = 0; i < data.length; i += 3) { // skip by 3 since it's 3 channels
         data[i + 1] = clamp(data[i + 1] * saturationScale); // scale saturation up or down
-        data[i + 2] = clamp(data[i + 2] * valueScale + valueOffset); // scale brightness and add offset
+        data[i + 2] = clamp(data[i + 2] * valueScale + valueOffset); // scale contrast and add offset(overall brightness)
       }
       cv.cvtColor(hsv, dst, cv.COLOR_HSV2RGB); // convert back to rgb for display
     } finally {
@@ -139,7 +148,7 @@
     const sampleMat = new cv.Mat();
     try {
       // shrink image to 80x80 to make the math way faster
-      cv.resize(src, sampleMat, new cv.Size(80, 80), 0, 0, cv.INTER_AREA);
+      cv.resize(src, sampleMat, new cv.Size(80, 80), 0, 0, cv.INTER_AREA); //moiré patterns prevention
       const sampleData = sampleMat.data;
       const numSamples = sampleData.length / 3; // total pixels
       const centroids = []; // holds our cluster center colors
@@ -242,7 +251,7 @@
     const finalDst = new cv.Mat();
     const edgeThickness = Math.max(1, Math.round(settings.edgeBlockSize));
     const kernel = cv.Mat.ones(edgeThickness, edgeThickness, cv.CV_8U); // used for thickening lines
-    // get border value from morphology if exists, otherwise use empty scalar
+    // get border value from morphology if exists, otherwise use empty scalar, dummy fake value
     const borderValue = typeof cv.morphologyDefaultBorderValue === 'function' ? cv.morphologyDefaultBorderValue() : new cv.Scalar();
 
     try {
