@@ -693,7 +693,7 @@ export default function App() {
                     value={settings.cartoonSmoothingMode}
                     onChange={(event) => setSettings((current) => ({ ...current, cartoonSmoothingMode: event.target.value }))}
                   >
-                    <option value="lut-only">Lookup Table Only</option>
+                    <option value="lut-only">        </option>
                     <option value="single-bilateral">1 Bilateral Pass</option>
                     <option value="double-bilateral">2 Bilateral Passes</option>
                   </select>
